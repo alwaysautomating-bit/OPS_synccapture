@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Clock, PackagePlus, Plus, Trash2 } from 'lucide-react';
-import { Item, MaterialLine, MaterialVarianceHandling, SupplierOutreachDraft, Vendor, VendorItemPriceHistory } from '../types';
+import { ComparableVendorQuote, Item, MaterialLine, MaterialVarianceHandling, SupplierOutreachDraft, SupabaseJob, Vendor, VendorItemPriceHistory } from '../types';
 import {
   formatPriceDelta,
   getVendorItemExtremeChangeHint,
@@ -16,11 +16,17 @@ interface MaterialPriceMemoryProps {
   items: Item[];
   vendors: Vendor[];
   selectedVendorId?: string;
+  selectedJob?: SupabaseJob;
   priceHistory: VendorItemPriceHistory[];
   outreachDrafts: SupplierOutreachDraft[];
+  comparableQuotesByLineId?: Record<string, ComparableVendorQuote[]>;
+  loadingComparableLineId?: string | null;
+  comparisonError?: string | null;
   onChange: (materials: MaterialLine[]) => void;
   onVendorChange?: (vendorId: string) => void;
   onSaveOutreachDraft: (draft: SupplierOutreachDraft) => void;
+  onLoadComparableQuotes?: (lineId: string, itemId: string) => void;
+  onUseComparableQuote?: (lineId: string, quote: ComparableVendorQuote) => void;
 }
 
 export const MaterialPriceMemory = ({
@@ -28,11 +34,17 @@ export const MaterialPriceMemory = ({
   items,
   vendors,
   selectedVendorId,
+  selectedJob,
   priceHistory,
   outreachDrafts,
+  comparableQuotesByLineId = {},
+  loadingComparableLineId,
+  comparisonError,
   onChange,
   onVendorChange,
   onSaveOutreachDraft,
+  onLoadComparableQuotes,
+  onUseComparableQuote,
 }: MaterialPriceMemoryProps) => {
   const selectedVendor = vendors.find(vendor => vendor.id === selectedVendorId);
   const [comparisonLineId, setComparisonLineId] = useState<string | null>(null);
@@ -89,6 +101,15 @@ export const MaterialPriceMemory = ({
       }))
       .filter((candidate): candidate is { entry: VendorItemPriceHistory; vendor: Vendor } => Boolean(candidate.vendor))
       .sort((a, b) => a.vendor.name.localeCompare(b.vendor.name));
+  };
+
+  const openComparison = (line: MaterialLine) => {
+    const nextLineId = comparisonLineId === line.id ? null : line.id;
+    setComparisonLineId(nextLineId);
+
+    if (nextLineId && onLoadComparableQuotes) {
+      onLoadComparableQuotes(line.id, line.itemId);
+    }
   };
 
   const buildDraftBody = (supplier: Vendor, item: Item, line: MaterialLine) => {
@@ -152,6 +173,92 @@ export const MaterialPriceMemory = ({
     }
   };
 
+  const renderSupabaseComparisonPanel = (
+    line: MaterialLine,
+    item: Item,
+    comparableQuotes: ComparableVendorQuote[],
+    isLoadingComparison: boolean
+  ) => (
+    <div className="mt-2 p-2 bg-stone-200 border-2 border-zinc-900 rounded-sm">
+      <p className="text-[9px] font-mono font-black uppercase text-zinc-600 mb-2">
+        Compare vendors for {item.canonicalName}
+      </p>
+      {selectedJob && (
+        <p className="text-[9px] font-mono font-bold uppercase text-zinc-500 mb-2">
+          Job {selectedJob.jobId} · {selectedJob.customerName || 'Active job'}
+        </p>
+      )}
+      {isLoadingComparison ? (
+        <p className="text-[9px] font-mono font-bold uppercase text-zinc-500">
+          Loading comparable quotes...
+        </p>
+      ) : comparisonError ? (
+        <p className="text-[9px] font-mono font-bold uppercase text-red-700">
+          {comparisonError}
+        </p>
+      ) : comparableQuotes.length === 0 ? (
+        <p className="text-[9px] font-mono font-bold uppercase text-zinc-500">
+          No Supabase quote responses found for this job and item.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {comparableQuotes.map(quote => (
+            <div key={quote.id} className="p-2 bg-stone-100 border-2 border-zinc-900 rounded-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="text-[10px] font-mono font-black uppercase text-zinc-900">{quote.vendorName}</p>
+                    {quote.isCheapest && (
+                      <span className="px-1.5 py-0.5 bg-lime-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[8px] font-mono font-black uppercase">
+                        Cheapest
+                      </span>
+                    )}
+                    {quote.vendorPreferred && (
+                      <span className="px-1.5 py-0.5 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[8px] font-mono font-black uppercase">
+                        Preferred
+                      </span>
+                    )}
+                    {quote.vendorId === selectedVendorId && (
+                      <span className="px-1.5 py-0.5 bg-zinc-900 text-stone-100 rounded-sm border-2 border-zinc-900 text-[8px] font-mono font-black uppercase">
+                        Current
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[9px] font-mono font-bold uppercase text-zinc-500">
+                    Qty {quote.quantity} · Unit ${quote.unitPrice.toFixed(2)} · Ship ${quote.shippingCost.toFixed(2)}
+                  </p>
+                  <p className="text-[9px] font-mono font-bold uppercase text-zinc-500">
+                    {quote.leadTimeDays === null ? 'Lead time not set' : `${quote.leadTimeDays} day lead`} · {new Date(quote.createdAt).toLocaleDateString()}
+                  </p>
+                  {quote.notes && (
+                    <p className="mt-1 text-[9px] font-mono font-bold uppercase text-zinc-600">
+                      {quote.notes}
+                    </p>
+                  )}
+                </div>
+                <p className="text-sm font-oswald font-black text-zinc-900">${quote.totalCost.toFixed(2)}</p>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <button
+                  onClick={() => onUseComparableQuote?.(line.id, quote)}
+                  className="px-2 py-1 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[9px] font-mono font-black uppercase"
+                >
+                  Use this vendor
+                </button>
+                <button
+                  onClick={() => handleVariance(line.id, 'used_last_known', quote.unitPrice)}
+                  className="px-2 py-1 bg-stone-200 text-zinc-700 rounded-sm border-2 border-zinc-900 text-[9px] font-mono font-black uppercase"
+                >
+                  Use this price
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="p-3 bg-stone-200 rounded-sm border-2 border-zinc-900">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -212,7 +319,10 @@ export const MaterialPriceMemory = ({
             const outsideRecentRange = recentRange.status === 'Above recent range' || recentRange.status === 'Below recent range';
             const hasUnusualPrice = hasEnteredPrice && (watch.shouldShow || extremeHint.shouldShow || outsideRecentRange);
             const knownVendorPrices = getKnownVendorPricesForItem(line.itemId);
+            const comparableQuotes = comparableQuotesByLineId[line.id] ?? [];
+            const hasSupabaseComparison = Boolean(selectedJob && onLoadComparableQuotes && onUseComparableQuote);
             const isComparingVendors = comparisonLineId === line.id;
+            const isLoadingComparison = loadingComparableLineId === line.id;
             const deltaText = formatPriceDelta(delta);
 
             return (
@@ -279,7 +389,7 @@ export const MaterialPriceMemory = ({
                   className="w-full p-2 bg-stone-50 rounded-sm border-2 border-zinc-900 text-xs font-mono text-zinc-900 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                 />
 
-                {selectedVendor && item && (
+                {item && (
                   <div className={`flex items-start gap-2 p-2 rounded-sm text-[10px] font-mono font-bold uppercase border-2 ${latestPrice ? 'bg-orange-500/10 border-orange-500 text-orange-700' : 'bg-stone-200 border-zinc-400 text-zinc-500'}`}>
                     <Clock className="w-3 h-3 mt-0.5" />
                     <div className="space-y-0.5">
@@ -346,9 +456,9 @@ export const MaterialPriceMemory = ({
                                   Handled: {line.varianceHandling.replace('_', ' ')}
                                 </span>
                               )}
-                              {knownVendorPrices.length > 0 && (
+                              {(hasSupabaseComparison || knownVendorPrices.length > 0) && (
                                 <button
-                                  onClick={() => setComparisonLineId(isComparingVendors ? null : line.id)}
+                                  onClick={() => openComparison(line)}
                                   className={`px-2 py-1 rounded-sm border-2 border-zinc-900 text-[9px] font-mono font-black uppercase transition-all ${isComparingVendors ? 'bg-orange-500 text-zinc-900' : 'bg-stone-100 text-zinc-700'}`}
                                 >
                                   Compare vendors
@@ -356,10 +466,22 @@ export const MaterialPriceMemory = ({
                               )}
                             </div>
                           )}
-                          {hasUnusualPrice && isComparingVendors && (
+                          {!hasUnusualPrice && hasSupabaseComparison && (
+                            <div className="mt-2">
+                              <button
+                                onClick={() => openComparison(line)}
+                                className={`px-2 py-1 rounded-sm border-2 border-zinc-900 text-[9px] font-mono font-black uppercase transition-all ${isComparingVendors ? 'bg-orange-500 text-zinc-900' : 'bg-stone-100 text-zinc-700'}`}
+                              >
+                                Compare vendors
+                              </button>
+                            </div>
+                          )}
+                          {isComparingVendors && (hasSupabaseComparison ? (
+                            renderSupabaseComparisonPanel(line, item, comparableQuotes, isLoadingComparison)
+                          ) : (
                             <div className="mt-2 p-2 bg-stone-200 border-2 border-zinc-900 rounded-sm">
                               <p className="text-[9px] font-mono font-black uppercase text-zinc-600 mb-2">
-                                Known vendors for {item.canonicalName}
+                                Compare vendors for {item.canonicalName}
                               </p>
                               {knownVendorPrices.length === 0 ? (
                                 <p className="text-[9px] font-mono font-bold uppercase text-zinc-500">
@@ -440,10 +562,21 @@ export const MaterialPriceMemory = ({
                                 </div>
                               )}
                             </div>
-                          )}
+                          ))}
                         </>
                       ) : (
-                        <p>No history yet for {selectedVendor.name} and {item.canonicalName}.</p>
+                        <>
+                          <p>{selectedVendor ? `No history yet for ${selectedVendor.name} and ${item.canonicalName}.` : `No vendor selected yet for ${item.canonicalName}.`}</p>
+                          {hasSupabaseComparison && (
+                            <button
+                              onClick={() => openComparison(line)}
+                              className={`mt-2 px-2 py-1 rounded-sm border-2 border-zinc-900 text-[9px] font-mono font-black uppercase transition-all ${isComparingVendors ? 'bg-orange-500 text-zinc-900' : 'bg-stone-100 text-zinc-700'}`}
+                            >
+                              Compare vendors
+                            </button>
+                          )}
+                          {hasSupabaseComparison && isComparingVendors && renderSupabaseComparisonPanel(line, item, comparableQuotes, isLoadingComparison)}
+                        </>
                       )}
                     </div>
                   </div>

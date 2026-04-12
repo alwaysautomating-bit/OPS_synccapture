@@ -31,9 +31,15 @@ import {
   Truck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { QuickQuote, Customer, InputType, Invoice, WorkOrder, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft } from './types';
+import { QuickQuote, Customer, InputType, Invoice, WorkOrder, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft, SupabaseJob, ComparableVendorQuote } from './types';
 import { MOCK_CUSTOMERS, MOCK_ITEMS, MOCK_VENDOR_ITEM_PRICE_HISTORY, MOCK_VENDORS } from './mockData';
 import { usePersistentCollection } from './hooks/usePersistentCollection';
+import { isSupabaseConfigured } from './lib/env';
+import { getJobs } from './data/jobs';
+import { getItems } from './data/items';
+import { getVendors } from './data/vendors';
+import { getComparableQuotesForItem } from './data/quotes';
+import { createOrUpdatePartsUsage } from './data/partsUsage';
 import { interpretQuote } from './services/geminiService';
 import { Calculator } from './components/Calculator';
 import { LandingPage } from './components/LandingPage';
@@ -111,18 +117,38 @@ const SuggestionCard = ({
   items,
   priceHistory,
   outreachDrafts,
+  supabaseJobs,
+  selectedSupabaseJobId,
+  selectedSupabaseJob,
+  supabaseError,
+  comparableQuotesByLineId,
+  loadingComparableLineId,
+  comparisonError,
   onEdit,
+  onSelectedSupabaseJobChange,
   onOpenVendorManager,
   onSaveOutreachDraft,
+  onLoadComparableQuotes,
+  onUseComparableQuote,
 }: {
   quote: Partial<QuickQuote>;
   vendors: Vendor[];
   items: Item[];
   priceHistory: VendorItemPriceHistory[];
   outreachDrafts: SupplierOutreachDraft[];
+  supabaseJobs: SupabaseJob[];
+  selectedSupabaseJobId?: string;
+  selectedSupabaseJob?: SupabaseJob;
+  supabaseError?: string | null;
+  comparableQuotesByLineId: Record<string, ComparableVendorQuote[]>;
+  loadingComparableLineId: string | null;
+  comparisonError: string | null;
   onEdit: (field: keyof QuickQuote, value: any) => void;
+  onSelectedSupabaseJobChange: (jobId: string) => void;
   onOpenVendorManager: () => void;
   onSaveOutreachDraft: (draft: SupplierOutreachDraft) => void;
+  onLoadComparableQuotes: (lineId: string, itemId: string) => void;
+  onUseComparableQuote: (lineId: string, quote: ComparableVendorQuote) => void;
 }) => {
   const confidenceColor = quote.confidence_score && quote.confidence_score > 0.8 ? 'text-lime-600' : 'text-amber-600';
   const selectedVendor = vendors.find(vendor => vendor.id === quote.vendorId);
@@ -179,6 +205,34 @@ const SuggestionCard = ({
           </div>
         )}
 
+        {isSupabaseConfigured && (
+          <div className="p-3 bg-stone-200 rounded-sm border-2 border-zinc-900">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-zinc-500 block mb-2">Supabase Job</span>
+            {supabaseJobs.length > 0 ? (
+              <select
+                value={selectedSupabaseJobId ?? ''}
+                onChange={(event) => onSelectedSupabaseJobChange(event.target.value)}
+                className="w-full p-3 bg-stone-100 rounded-sm border-2 border-zinc-900 text-xs font-mono font-bold text-zinc-900 focus:ring-2 focus:ring-orange-500 focus:outline-none"
+              >
+                {supabaseJobs.map(job => (
+                  <option key={job.id} value={job.id}>
+                    {job.jobId} - {job.customerName || 'Active job'}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="text-[10px] font-mono font-bold uppercase text-zinc-500">
+                {supabaseError ?? 'No Supabase jobs loaded yet.'}
+              </p>
+            )}
+            {selectedSupabaseJob && (
+              <p className="mt-2 text-[10px] font-mono font-bold uppercase text-zinc-600">
+                Compare choices save to parts usage for {selectedSupabaseJob.jobId}.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="p-3 bg-stone-200 rounded-sm border-2 border-zinc-900">
           <div className="flex items-center justify-between gap-3 mb-2">
             <div className="flex items-center gap-2">
@@ -223,11 +277,17 @@ const SuggestionCard = ({
           items={items}
           vendors={vendors}
           selectedVendorId={quote.vendorId}
+          selectedJob={selectedSupabaseJob}
           priceHistory={priceHistory}
           outreachDrafts={outreachDrafts}
+          comparableQuotesByLineId={comparableQuotesByLineId}
+          loadingComparableLineId={loadingComparableLineId}
+          comparisonError={comparisonError}
           onChange={(materials) => onEdit('materials', materials)}
           onVendorChange={(vendorId) => onEdit('vendorId', vendorId)}
           onSaveOutreachDraft={onSaveOutreachDraft}
+          onLoadComparableQuotes={onLoadComparableQuotes}
+          onUseComparableQuote={onUseComparableQuote}
         />
 
         <div className="pt-4 border-t-2 border-zinc-200 flex items-center justify-between">
@@ -358,6 +418,14 @@ export default function App() {
   const [items] = usePersistentCollection<Item>('items', MOCK_ITEMS);
   const [priceHistory, setPriceHistory] = usePersistentCollection<VendorItemPriceHistory>('vendorItemPriceHistory', MOCK_VENDOR_ITEM_PRICE_HISTORY);
   const [supplierOutreachDrafts, setSupplierOutreachDrafts] = usePersistentCollection<SupplierOutreachDraft>('supplierOutreachDrafts', []);
+  const [supabaseJobs, setSupabaseJobs] = useState<SupabaseJob[]>([]);
+  const [supabaseVendors, setSupabaseVendors] = useState<Vendor[]>([]);
+  const [supabaseItems, setSupabaseItems] = useState<Item[]>([]);
+  const [selectedSupabaseJobId, setSelectedSupabaseJobId] = useState<string>('');
+  const [supabaseError, setSupabaseError] = useState<string | null>(null);
+  const [comparableQuotesByLineId, setComparableQuotesByLineId] = useState<Record<string, ComparableVendorQuote[]>>({});
+  const [loadingComparableLineId, setLoadingComparableLineId] = useState<string | null>(null);
+  const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [inputType, setInputType] = useState<InputType>('typed');
   const [history, setHistory] = usePersistentCollection<Partial<QuickQuote> & { id: string }>('quickQuotes', [
     {
@@ -440,6 +508,103 @@ export default function App() {
       };
     }
   }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    let isCancelled = false;
+
+    const loadSupabaseSlice = async () => {
+      try {
+        const [jobs, remoteVendors, remoteItems] = await Promise.all([
+          getJobs(),
+          getVendors(),
+          getItems(),
+        ]);
+
+        if (isCancelled) return;
+
+        setSupabaseJobs(jobs);
+        setSupabaseVendors(remoteVendors);
+        setSupabaseItems(remoteItems);
+        setSelectedSupabaseJobId(currentJobId => currentJobId || jobs[0]?.id || '');
+        setSupabaseError(null);
+      } catch (error) {
+        console.warn('Could not load Supabase comparison data', error);
+        if (!isCancelled) {
+          setSupabaseError('Supabase comparison data could not be loaded.');
+        }
+      }
+    };
+
+    loadSupabaseSlice();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  const activeVendors = supabaseVendors.length > 0 ? supabaseVendors : vendors;
+  const activeItems = supabaseItems.length > 0 ? supabaseItems : items;
+  const selectedSupabaseJob = supabaseJobs.find(job => job.id === selectedSupabaseJobId);
+
+  const handleLoadComparableQuotes = async (lineId: string, itemId: string) => {
+    if (!selectedSupabaseJobId) {
+      setComparisonError('Select a Supabase job before comparing vendors.');
+      return;
+    }
+
+    setLoadingComparableLineId(lineId);
+    setComparisonError(null);
+
+    try {
+      const quotes = await getComparableQuotesForItem(selectedSupabaseJobId, itemId);
+      setComparableQuotesByLineId(current => ({
+        ...current,
+        [lineId]: quotes,
+      }));
+    } catch (error) {
+      console.warn('Could not load comparable quotes', error);
+      setComparisonError('Could not load Supabase quote responses.');
+    } finally {
+      setLoadingComparableLineId(null);
+    }
+  };
+
+  const handleUseComparableQuote = async (lineId: string, comparableQuote: ComparableVendorQuote) => {
+    if (!suggestedQuote) return;
+
+    const updatedMaterials = (suggestedQuote.materials ?? []).map(line =>
+      line.id === lineId
+        ? {
+            ...line,
+            itemId: comparableQuote.itemId,
+            quantity: comparableQuote.quantity,
+            unitPrice: comparableQuote.unitPrice,
+            varianceHandling: 'intentional' as const,
+            varianceHandledAt: new Date().toISOString(),
+          }
+        : line
+    );
+    const estimatedMaterialCost = updatedMaterials.reduce((sum, line) => sum + line.quantity * (line.unitPrice ?? 0), 0);
+    const updatedQuote = {
+      ...suggestedQuote,
+      vendorId: comparableQuote.vendorId,
+      materials: updatedMaterials,
+      estimated_material_cost: estimatedMaterialCost,
+      estimated_total: estimatedMaterialCost + (suggestedQuote.estimated_labor_cost ?? 0) + (suggestedQuote.estimated_subcontractor_cost ?? 0),
+    };
+
+    setSuggestedQuote(updatedQuote);
+    setComparisonError(null);
+
+    try {
+      await createOrUpdatePartsUsage(comparableQuote, true);
+    } catch (error) {
+      console.warn('Could not persist parts usage', error);
+      setComparisonError('Vendor choice updated locally, but parts usage could not be saved.');
+    }
+  };
 
   const handleInterpret = async (text: string, type: InputType) => {
     if (!text.trim()) return;
@@ -804,7 +969,7 @@ export default function App() {
     alert("Invoice marked as paid.");
   };
 
-  const getVendor = (vendorId?: string) => vendors.find(vendor => vendor.id === vendorId);
+  const getVendor = (vendorId?: string) => activeVendors.find(vendor => vendor.id === vendorId);
 
   if (view === 'landing') {
     return <LandingPage onStart={() => setView('app')} />;
@@ -867,7 +1032,7 @@ export default function App() {
                     {wo.materials && wo.materials.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {wo.materials.map(line => {
-                          const materialItem = items.find(currentItem => currentItem.id === line.itemId);
+                          const materialItem = activeItems.find(currentItem => currentItem.id === line.itemId);
                           return (
                             <span key={line.id} className="px-1.5 py-0.5 bg-stone-200 text-zinc-700 text-[8px] font-mono font-bold rounded-sm uppercase border-2 border-zinc-400">
                               {materialItem?.canonicalName ?? 'Material'} · {line.quantity}
@@ -920,8 +1085,8 @@ export default function App() {
           history={history}
           invoices={invoices}
           workOrders={workOrders}
-          vendors={vendors}
-          items={items}
+          vendors={activeVendors}
+          items={activeItems}
           onFormalize={handleFormalize}
           onGenerateInvoice={handleGenerateInvoice}
           onMarkAsPaid={handleMarkAsPaid}
@@ -941,8 +1106,8 @@ export default function App() {
         />
         <VendorManager
           isOpen={showVendorManager}
-          vendors={vendors}
-          items={items}
+          vendors={activeVendors}
+          items={activeItems}
           priceHistory={priceHistory}
           onClose={() => setShowVendorManager(false)}
           onSaveVendor={handleSaveVendor}
@@ -1094,11 +1259,19 @@ export default function App() {
         {suggestedQuote && !isInterpreting && (
           <SuggestionCard
             quote={suggestedQuote}
-            vendors={vendors}
-            items={items}
+            vendors={activeVendors}
+            items={activeItems}
             priceHistory={priceHistory}
             outreachDrafts={supplierOutreachDrafts}
+            supabaseJobs={supabaseJobs}
+            selectedSupabaseJobId={selectedSupabaseJobId}
+            selectedSupabaseJob={selectedSupabaseJob}
+            supabaseError={supabaseError}
+            comparableQuotesByLineId={comparableQuotesByLineId}
+            loadingComparableLineId={loadingComparableLineId}
+            comparisonError={comparisonError}
             onEdit={handleEdit}
+            onSelectedSupabaseJobChange={setSelectedSupabaseJobId}
             onOpenVendorManager={() => setShowVendorManager(true)}
             onSaveOutreachDraft={(draft) => {
               setSupplierOutreachDrafts(currentDrafts => {
@@ -1108,6 +1281,8 @@ export default function App() {
                   : [draft, ...currentDrafts];
               });
             }}
+            onLoadComparableQuotes={handleLoadComparableQuotes}
+            onUseComparableQuote={handleUseComparableQuote}
           />
         )}
 
@@ -1178,7 +1353,7 @@ export default function App() {
                         {item.materials && item.materials.length > 0 && (
                           <div className="mb-2 flex flex-wrap gap-1">
                             {item.materials.map(line => {
-                              const materialItem = items.find(currentItem => currentItem.id === line.itemId);
+                              const materialItem = activeItems.find(currentItem => currentItem.id === line.itemId);
                               return (
                                 <span key={line.id} className="px-1.5 py-0.5 bg-stone-200 text-zinc-700 text-[8px] font-mono font-bold rounded-sm uppercase border-2 border-zinc-400">
                                   {materialItem?.canonicalName ?? 'Material'} · {line.quantity}
@@ -1229,8 +1404,8 @@ export default function App() {
 
         <VendorManager
           isOpen={showVendorManager}
-          vendors={vendors}
-          items={items}
+          vendors={activeVendors}
+          items={activeItems}
           priceHistory={priceHistory}
           onClose={() => setShowVendorManager(false)}
           onSaveVendor={handleSaveVendor}

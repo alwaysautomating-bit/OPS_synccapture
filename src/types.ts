@@ -73,6 +73,44 @@ export interface SupplierOutreachDraft {
   updatedAt: string;
 }
 
+export interface SupabaseJob {
+  id: string;
+  jobId: string;
+  customerName: string;
+  status: string;
+  createdAt: string;
+}
+
+export interface ComparableVendorQuote {
+  id: string;
+  jobId: string;
+  itemId: string;
+  vendorId: string;
+  vendorName: string;
+  vendorPreferred: boolean;
+  quantity: number;
+  unitPrice: number;
+  shippingCost: number;
+  totalCost: number;
+  leadTimeDays: number | null;
+  notes: string;
+  createdAt: string;
+  isCheapest?: boolean;
+}
+
+export interface PartsUsage {
+  id: string;
+  jobId: string;
+  itemId: string;
+  vendorId: string;
+  quantity: number;
+  unitPrice: number;
+  totalCost: number;
+  sourceQuoteId?: string;
+  confirmed: boolean;
+  createdAt: string;
+}
+
 export interface Invoice {
   id: string;
   quote_id: string;

@@ -1,0 +1,5 @@
+{
+  "name": "SyncCapture",
+  "description": "Quick capture for the field. Speak. Snap. Done. From the truck to the books — without the paperwork.",
+  "requestFramePermissions": ["microphone", "geolocation", "camera"]
+}

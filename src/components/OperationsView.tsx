@@ -14,12 +14,13 @@ import {
   Truck
 } from 'lucide-react';
 import { motion } from 'motion/react';
-import { Item, QuickQuote, Invoice, WorkOrder, Vendor } from '../types';
+import { Item, QuickQuote, Invoice, WorkOrder, Vendor, OpsQueueItem, OpsQueueName } from '../types';
 
 interface OperationsViewProps {
   history: Partial<QuickQuote>[];
   invoices: Invoice[];
   workOrders: WorkOrder[];
+  opsQueueItems: OpsQueueItem[];
   vendors: Vendor[];
   items: Item[];
   onGenerateInvoice: (quote: Partial<QuickQuote>) => void;
@@ -33,6 +34,7 @@ export const OperationsView = ({
   history, 
   invoices, 
   workOrders, 
+  opsQueueItems,
   vendors,
   items,
   onGenerateInvoice,
@@ -45,6 +47,22 @@ export const OperationsView = ({
   const formalizedQuotes = history.filter(q => q.status === 'formalized');
   const getVendor = (vendorId?: string) => vendors.find(vendor => vendor.id === vendorId);
   const getItem = (itemId?: string) => items.find(item => item.id === itemId);
+  const queueLabels: Record<OpsQueueName, string> = {
+    proposals: 'Proposals',
+    work_orders: 'Work Orders',
+    office_updates: 'Office Updates',
+    emergencies: 'Emergencies',
+  };
+  const queueTone: Record<OpsQueueName, string> = {
+    proposals: 'border-orange-500',
+    work_orders: 'border-lime-500',
+    office_updates: 'border-zinc-900',
+    emergencies: 'border-red-600',
+  };
+  const queueBuckets = (['emergencies', 'proposals', 'work_orders', 'office_updates'] as OpsQueueName[]).map(queue => ({
+    queue,
+    items: opsQueueItems.filter(item => item.queue === queue),
+  }));
   
   const totalRevenue = invoices.reduce((sum, inv) => sum + inv.amount, 0);
   const pendingRevenue = invoices.filter(inv => inv.status === 'pending').reduce((sum, inv) => sum + inv.amount, 0);
@@ -69,6 +87,60 @@ export const OperationsView = ({
         </div>
         <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/10 rounded-full -mr-16 -mt-16 blur-3xl"></div>
       </div>
+
+      {/* Routed Action Queues */}
+      <section>
+        <div className="flex items-center justify-between mb-4 border-b-2 border-zinc-900 pb-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-orange-500" />
+            <h2 className="text-xl font-oswald font-bold text-zinc-900 uppercase">Action Queues</h2>
+          </div>
+          <span className="px-2 py-0.5 bg-zinc-900 text-stone-100 text-[10px] font-mono font-bold rounded-sm border-2 border-zinc-900">
+            {opsQueueItems.length}
+          </span>
+        </div>
+
+        <div className="space-y-4">
+          {queueBuckets.map(({ queue, items: queueItems }) => (
+            <div key={queue} className={`bg-stone-100 rounded-sm border-2 ${queueTone[queue]} shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]`}>
+              <div className="flex items-center justify-between p-3 border-b-2 border-zinc-900">
+                <h3 className="font-oswald font-bold text-lg text-zinc-900 uppercase">{queueLabels[queue]}</h3>
+                <span className="text-[10px] font-mono font-bold uppercase text-zinc-500">{queueItems.length} open</span>
+              </div>
+              <div className="divide-y-2 divide-zinc-200">
+                {queueItems.length === 0 ? (
+                  <p className="p-4 text-[10px] font-mono font-bold uppercase text-zinc-500">No routed captures.</p>
+                ) : (
+                  queueItems.map(item => (
+                    <div key={item.id} className="p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h4 className="font-oswald font-bold text-lg text-zinc-900 uppercase leading-tight">{item.title}</h4>
+                          <p className="mt-1 text-[10px] font-mono font-bold uppercase text-zinc-500 line-clamp-2">{item.summary}</p>
+                        </div>
+                        <span className={`px-2 py-1 text-[9px] font-mono font-bold uppercase border-2 border-zinc-900 rounded-sm ${
+                          item.priority === 'emergency' ? 'bg-red-600 text-stone-100' :
+                          item.priority === 'urgent' ? 'bg-amber-500 text-zinc-900' :
+                          'bg-stone-200 text-zinc-700'
+                        }`}>
+                          {item.priority}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-mono font-bold uppercase text-zinc-600">
+                        <span>{item.jobMatch?.workOrderId ?? item.jobMatch?.customerName ?? 'No job match'}</span>
+                        <span className="text-right">{Math.round((item.confidenceScore ?? 0) * 100)}% confidence</span>
+                      </div>
+                      {item.reasons.length > 0 && (
+                        <p className="mt-2 text-[10px] font-mono uppercase text-zinc-500">{item.reasons[0]}</p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* Proposals Section */}
       <section>

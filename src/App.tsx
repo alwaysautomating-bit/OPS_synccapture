@@ -3,9 +3,6 @@ import {
   Mic, 
   Keyboard, 
   Camera, 
-  DollarSign, 
-  Save, 
-  Send, 
   ChevronRight, 
   ChevronDown,
   AlertCircle, 
@@ -18,7 +15,6 @@ import {
   X,
   Plus,
   Minus,
-  Calculator as CalcIcon,
   Clock,
   Navigation,
   AlertTriangle,
@@ -28,10 +24,14 @@ import {
   LayoutDashboard,
   LineChart,
   Star,
-  Truck
+  Truck,
+  Package,
+  Image as ImageIcon,
+  Save,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { QuickQuote, Customer, InputType, Invoice, WorkOrder, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft, SupabaseJob, ComparableVendorQuote } from './types';
+import { QuickQuote, Customer, InputType, Invoice, WorkOrder, WorkOrderDetailDraft, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft, SupabaseJob, ComparableVendorQuote, RoutingDecision, PrimaryAction, OpsQueueItem, JobMatchingCandidate } from './types';
 import { MOCK_CUSTOMERS, MOCK_ITEMS, MOCK_VENDOR_ITEM_PRICE_HISTORY, MOCK_VENDORS } from './mockData';
 import { usePersistentCollection } from './hooks/usePersistentCollection';
 import { isSupabaseConfigured } from './lib/env';
@@ -41,7 +41,7 @@ import { getVendors } from './data/vendors';
 import { getComparableQuotesForItem } from './data/quotes';
 import { createOrUpdatePartsUsage } from './data/partsUsage';
 import { interpretQuote } from './services/geminiService';
-import { Calculator } from './components/Calculator';
+import { buildRoutingDecision, createOpsQueueItem, detectSuggestedActions, matchJob, normalizeCapture } from './routing';
 import { LandingPage } from './components/LandingPage';
 import { PhotoCapture } from './components/PhotoCapture';
 import { OperationsView } from './components/OperationsView';
@@ -71,8 +71,8 @@ const JobContext = ({ customer }: { customer: Customer }) => (
   </div>
 );
 
-const QuickActions = ({ onAction }: { onAction: (type: 'talk' | 'type' | 'photo' | 'budget' | 'calc') => void }) => (
-  <div className="grid grid-cols-5 gap-2 p-4 bg-stone-300 border-b-2 border-zinc-900">
+const QuickActions = ({ onAction }: { onAction: (type: 'talk' | 'type' | 'photo') => void }) => (
+  <div className="grid grid-cols-3 gap-2 p-4 bg-stone-300 border-b-2 border-zinc-900">
     <button 
       onClick={() => onAction('talk')}
       className="flex flex-col items-center justify-center gap-1 p-3 bg-stone-100 rounded-sm border-2 border-zinc-900 shadow-[2px_2px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
@@ -94,25 +94,300 @@ const QuickActions = ({ onAction }: { onAction: (type: 'talk' | 'type' | 'photo'
       <Camera className="w-6 h-6 text-zinc-700" />
       <span className="text-[10px] font-mono font-bold text-zinc-900 uppercase">Photo</span>
     </button>
-    <button 
-      onClick={() => onAction('budget')}
-      className="flex flex-col items-center justify-center gap-1 p-3 bg-stone-100 rounded-sm border-2 border-zinc-900 shadow-[2px_2px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
-    >
-      <DollarSign className="w-6 h-6 text-lime-600" />
-      <span className="text-[10px] font-mono font-bold text-zinc-900 uppercase">Budget</span>
-    </button>
-    <button 
-      onClick={() => onAction('calc')}
-      className="flex flex-col items-center justify-center gap-1 p-3 bg-stone-100 rounded-sm border-2 border-zinc-900 shadow-[2px_2px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
-    >
-      <CalcIcon className="w-6 h-6 text-amber-600" />
-      <span className="text-[10px] font-mono font-bold text-zinc-900 uppercase">Calc</span>
-    </button>
   </div>
 );
 
+type WorkOrderPanel = 'job-notes' | 'todays-work' | 'parts' | 'photos' | 'time';
+
+const createBlankWorkOrderDraft = (workOrderId: string): WorkOrderDetailDraft => ({
+  id: `wod-${workOrderId}`,
+  workOrderId,
+  jobNotes: '',
+  todaysWork: '',
+  todaysPart: '',
+  parts: [{ name: '', quantity: '' }],
+  photoNote: '',
+  timeNote: '',
+  updatedAt: new Date().toISOString(),
+});
+
+const WorkOrderDetailShell = ({
+  workOrder,
+  detail,
+  onSaveDetail,
+  onBack,
+}: {
+  workOrder: WorkOrder;
+  detail?: WorkOrderDetailDraft;
+  onSaveDetail: (detail: WorkOrderDetailDraft) => void;
+  onBack: () => void;
+}) => {
+  const [activePanel, setActivePanel] = useState<WorkOrderPanel | null>(null);
+  const [draft, setDraft] = useState<WorkOrderDetailDraft>(detail ?? createBlankWorkOrderDraft(workOrder.id));
+
+  useEffect(() => {
+    setDraft(detail ?? createBlankWorkOrderDraft(workOrder.id));
+  }, [detail, workOrder.id]);
+
+  const title = workOrder.title ?? workOrder.job_type;
+  const customerName = workOrder.customer_name ?? MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === workOrder.customer_id)?.name ?? 'Customer placeholder';
+  const address = workOrder.address ?? MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === workOrder.customer_id)?.address;
+  const createdAt = workOrder.created_at ?? workOrder.scheduled_date ?? new Date().toISOString();
+  const panelLabels: Record<WorkOrderPanel, string> = {
+    'job-notes': 'Job Notes',
+    'todays-work': "Today's Work",
+    parts: 'Parts',
+    photos: 'Photos',
+    time: 'Time',
+  };
+  const panels: { id: WorkOrderPanel; icon: React.ElementType; label: string }[] = [
+    { id: 'job-notes', icon: FileText, label: 'Job Notes' },
+    { id: 'todays-work', icon: ClipboardList, label: "Today's Work" },
+    { id: 'parts', icon: Package, label: 'Parts' },
+    { id: 'photos', icon: ImageIcon, label: 'Photos' },
+    { id: 'time', icon: Clock, label: 'Time' },
+  ];
+
+  const saveDraft = () => {
+    onSaveDetail({ ...draft, updatedAt: new Date().toISOString() });
+    setActivePanel(null);
+  };
+
+  const updatePart = (index: number, field: 'name' | 'quantity', value: string) => {
+    setDraft(currentDraft => ({
+      ...currentDraft,
+      parts: currentDraft.parts.map((part, currentIndex) => (
+        currentIndex === index ? { ...part, [field]: value } : part
+      )),
+    }));
+  };
+
+  const addPartRow = () => {
+    setDraft(currentDraft => ({
+      ...currentDraft,
+      parts: [...currentDraft.parts, { name: '', quantity: '' }],
+    }));
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-200 flex flex-col max-w-md mx-auto shadow-2xl overflow-hidden font-sans">
+      <div className="bg-stone-100 px-4 py-3 border-b-4 border-zinc-900 flex items-center justify-between sticky top-0 z-20 shadow-[0px_4px_0px_0px_rgba(24,24,27,1)]">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+        >
+          <div className="w-8 h-8 bg-orange-500 border-2 border-zinc-900 flex items-center justify-center transform -skew-x-12">
+            <ClipboardList className="w-4 h-4 text-zinc-900" />
+          </div>
+          <h1 className="font-oswald font-bold text-xl tracking-widest text-zinc-900 uppercase">WORK ORDER</h1>
+        </button>
+        <button
+          onClick={onBack}
+          className="p-2 text-orange-600 font-mono font-bold text-xs uppercase tracking-widest hover:text-orange-700 transition-colors"
+        >
+          Field
+        </button>
+      </div>
+
+      <main className="flex-1 overflow-y-auto pb-8">
+        <section className="p-5 bg-zinc-900 text-stone-100 border-b-4 border-orange-500">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-500">{workOrder.id}</p>
+              <h2 className="mt-1 font-oswald text-4xl font-bold uppercase leading-none break-words">{title}</h2>
+            </div>
+            <span className="shrink-0 px-2 py-1 bg-stone-100 text-zinc-900 rounded-sm border-2 border-orange-500 text-[10px] font-mono font-bold uppercase tracking-widest">
+              {workOrder.status}
+            </span>
+          </div>
+          <div className="mt-4 space-y-1 text-[11px] font-mono font-bold uppercase tracking-wide text-zinc-300">
+            <p className="flex items-center gap-2">
+              <User className="w-3 h-3 text-orange-500" />
+              {customerName}
+            </p>
+            {address && (
+              <p className="flex items-center gap-2">
+                <MapPin className="w-3 h-3 text-orange-500" />
+                {address}
+              </p>
+            )}
+            <p className="flex items-center gap-2 text-zinc-500">
+              <Clock className="w-3 h-3 text-orange-500" />
+              Created {new Date(createdAt).toLocaleDateString()}
+            </p>
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <button className="py-3 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest opacity-60">
+              Start Work
+            </button>
+            <button className="py-3 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest opacity-60">
+              Finish Today's Work
+            </button>
+          </div>
+        </section>
+
+        <section className="p-4 space-y-3">
+          {panels.map(panel => {
+            const Icon = panel.icon;
+            return (
+              <button
+                key={panel.id}
+                onClick={() => setActivePanel(panel.id)}
+                className="w-full bg-stone-100 border-2 border-zinc-900 rounded-sm shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] p-4 flex items-center justify-between text-left active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="w-10 h-10 bg-stone-200 border-2 border-zinc-900 rounded-sm flex items-center justify-center text-orange-600">
+                    <Icon className="w-5 h-5" />
+                  </span>
+                  <span className="font-oswald text-xl font-bold uppercase tracking-wide text-zinc-900">{panel.label}</span>
+                </span>
+                <ChevronRight className="w-5 h-5 text-zinc-500" />
+              </button>
+            );
+          })}
+        </section>
+      </main>
+
+      <AnimatePresence>
+        {activePanel && (
+          <motion.div
+            initial={{ y: '100%' }}
+            animate={{ y: 0 }}
+            exit={{ y: '100%' }}
+            transition={{ type: 'spring', damping: 28, stiffness: 260 }}
+            className="fixed inset-0 z-50 bg-stone-200 flex flex-col max-w-md mx-auto shadow-2xl border-x-2 border-zinc-900"
+          >
+            <div className="bg-stone-100 px-4 py-4 border-b-4 border-zinc-900 flex items-center justify-between shadow-[0px_4px_0px_0px_rgba(24,24,27,1)]">
+              <h3 className="font-oswald font-bold text-2xl text-zinc-900 uppercase">{panelLabels[activePanel]}</h3>
+              <button
+                onClick={() => setActivePanel(null)}
+                className="w-10 h-10 border-2 border-zinc-900 rounded-sm bg-stone-200 flex items-center justify-center"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {activePanel === 'job-notes' && (
+                <>
+                  <textarea
+                    value={draft.jobNotes}
+                    onChange={(event) => setDraft({ ...draft, jobNotes: event.target.value })}
+                    placeholder="Job notes"
+                    className="w-full min-h-[320px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                  />
+                  <button className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2">
+                    <Mic className="w-5 h-5 text-orange-600" />
+                    Voice
+                  </button>
+                </>
+              )}
+
+              {activePanel === 'todays-work' && (
+                <>
+                  <textarea
+                    value={draft.todaysWork}
+                    onChange={(event) => setDraft({ ...draft, todaysWork: event.target.value })}
+                    placeholder="What was done"
+                    className="w-full min-h-[240px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                  />
+                  <input
+                    value={draft.todaysPart}
+                    onChange={(event) => setDraft({ ...draft, todaysPart: event.target.value })}
+                    placeholder="Optional part"
+                    className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                  <button className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2">
+                    <Camera className="w-5 h-5 text-orange-600" />
+                    Optional Photo
+                  </button>
+                </>
+              )}
+
+              {activePanel === 'parts' && (
+                <div className="space-y-3">
+                  {draft.parts.map((part, index) => (
+                    <div key={index} className="grid grid-cols-[1fr_88px] gap-2">
+                      <input
+                        value={part.name}
+                        onChange={(event) => updatePart(index, 'name', event.target.value)}
+                        placeholder="Part name"
+                        className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      />
+                      <input
+                        value={part.quantity}
+                        onChange={(event) => updatePart(index, 'quantity', event.target.value)}
+                        placeholder="Qty"
+                        className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      />
+                    </div>
+                  ))}
+                  <button
+                    onClick={addPartRow}
+                    className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-dashed border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2"
+                  >
+                    <Plus className="w-5 h-5 text-orange-600" />
+                    Add Part
+                  </button>
+                </div>
+              )}
+
+              {activePanel === 'photos' && (
+                <>
+                  <button className="w-full min-h-[140px] bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3">
+                    <Camera className="w-8 h-8 text-orange-600" />
+                    Camera
+                  </button>
+                  <button className="w-full min-h-[140px] bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3">
+                    <Upload className="w-8 h-8 text-orange-600" />
+                    Upload
+                  </button>
+                  <input
+                    value={draft.photoNote}
+                    onChange={(event) => setDraft({ ...draft, photoNote: event.target.value })}
+                    placeholder="Photo note"
+                    className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                </>
+              )}
+
+              {activePanel === 'time' && (
+                <>
+                  <button className="w-full py-5 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest opacity-70">
+                    Start Work
+                  </button>
+                  <button className="w-full py-5 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest opacity-70">
+                    Finish Today's Work
+                  </button>
+                  <textarea
+                    value={draft.timeNote}
+                    onChange={(event) => setDraft({ ...draft, timeNote: event.target.value })}
+                    placeholder="Time note"
+                    className="w-full min-h-[180px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="p-4 bg-stone-100 border-t-4 border-zinc-900">
+              <button
+                onClick={saveDraft}
+                className="w-full py-4 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+              >
+                <Save className="w-5 h-5" />
+                Save
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
 const SuggestionCard = ({
   quote,
+  routingDecision,
   vendors,
   items,
   priceHistory,
@@ -125,6 +400,7 @@ const SuggestionCard = ({
   loadingComparableLineId,
   comparisonError,
   onEdit,
+  onExecuteAction,
   onSelectedSupabaseJobChange,
   onOpenVendorManager,
   onSaveOutreachDraft,
@@ -132,6 +408,7 @@ const SuggestionCard = ({
   onUseComparableQuote,
 }: {
   quote: Partial<QuickQuote>;
+  routingDecision: RoutingDecision | null;
   vendors: Vendor[];
   items: Item[];
   priceHistory: VendorItemPriceHistory[];
@@ -144,6 +421,7 @@ const SuggestionCard = ({
   loadingComparableLineId: string | null;
   comparisonError: string | null;
   onEdit: (field: keyof QuickQuote, value: any) => void;
+  onExecuteAction: (action: PrimaryAction) => void;
   onSelectedSupabaseJobChange: (jobId: string) => void;
   onOpenVendorManager: () => void;
   onSaveOutreachDraft: (draft: SupplierOutreachDraft) => void;
@@ -152,6 +430,12 @@ const SuggestionCard = ({
 }) => {
   const confidenceColor = quote.confidence_score && quote.confidence_score > 0.8 ? 'text-lime-600' : 'text-amber-600';
   const selectedVendor = vendors.find(vendor => vendor.id === quote.vendorId);
+  const actionTone: Record<PrimaryAction, string> = {
+    generate_proposal: 'bg-orange-500 text-zinc-900',
+    log_to_job: 'bg-lime-500 text-zinc-900',
+    notify_office: 'bg-stone-100 text-zinc-900',
+    escalate_emergency: 'bg-red-600 text-stone-100',
+  };
   
   return (
     <motion.div 
@@ -171,6 +455,57 @@ const SuggestionCard = ({
       </div>
 
       <div className="space-y-4">
+        {routingDecision && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="p-3 bg-stone-200 rounded-sm border-2 border-zinc-900">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-zinc-500 block mb-1">Linked Job</span>
+                <p className="font-oswald font-bold text-zinc-900 uppercase leading-tight">
+                  {routingDecision.jobMatch?.workOrderId ?? routingDecision.jobMatch?.customerName ?? 'Office Match Needed'}
+                </p>
+                <p className="text-[10px] font-mono font-bold uppercase text-zinc-500 mt-1">
+                  {routingDecision.jobMatch ? `${routingDecision.jobMatch.matchType.replace(/_/g, ' ')} / ${Math.round(routingDecision.jobMatch.confidence * 100)}%` : 'No confident match'}
+                </p>
+              </div>
+              <button
+                onClick={() => onEdit('is_urgent', !quote.is_urgent)}
+                className={`p-3 rounded-sm border-2 border-zinc-900 text-left transition-all active:translate-x-[2px] active:translate-y-[2px] ${quote.is_urgent ? 'bg-amber-500 text-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]' : 'bg-stone-200 text-zinc-600'}`}
+              >
+                <span className="text-[10px] font-mono font-bold uppercase tracking-widest block mb-1">Urgent Toggle</span>
+                <span className="font-oswald font-bold uppercase">{quote.is_urgent ? 'Urgent' : 'Default'}</span>
+              </button>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-zinc-500">Suggested Actions</span>
+                <span className="text-[10px] font-mono font-bold uppercase text-zinc-500">{routingDecision.targetQueue.replace('_', ' ')}</span>
+              </div>
+              <div className="grid gap-2">
+                {routingDecision.suggestedActions.map((suggestion) => (
+                  <button
+                    key={suggestion.action}
+                    onClick={() => onExecuteAction(suggestion.action)}
+                    className={`w-full p-4 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all text-left ${actionTone[suggestion.action]}`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-oswald text-xl font-bold uppercase tracking-wide">{suggestion.label}</span>
+                      <span className="text-[10px] font-mono font-bold uppercase">{Math.round(suggestion.confidence * 100)}%</span>
+                    </div>
+                    <p className="mt-1 text-[10px] font-mono font-bold uppercase opacity-75">{suggestion.reason}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <details className="group rounded-sm border-2 border-zinc-900 bg-stone-200">
+          <summary className="cursor-pointer list-none p-3 flex items-center justify-between">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-zinc-600">Supporting Extracted Data</span>
+            <ChevronDown className="w-4 h-4 text-zinc-900 group-open:rotate-180 transition-transform" />
+          </summary>
+          <div className="p-3 pt-0 space-y-4">
         <div className="grid grid-cols-2 gap-4">
           <div className="p-3 bg-stone-200 rounded-sm border-2 border-zinc-900">
             <span className="text-[10px] font-mono font-bold uppercase text-zinc-500 block mb-1">Materials</span>
@@ -292,8 +627,10 @@ const SuggestionCard = ({
 
         <div className="pt-4 border-t-2 border-zinc-200 flex items-center justify-between">
           <span className="text-sm font-oswald font-bold text-zinc-900 uppercase tracking-wider">Internal Budget</span>
-          <span className="text-3xl font-oswald font-black text-zinc-900">${quote.estimated_total}</span>
-        </div>
+            <span className="text-3xl font-oswald font-black text-zinc-900">${quote.estimated_total}</span>
+          </div>
+          </div>
+        </details>
 
         {/* Tags Section */}
         <div className="mt-4">
@@ -319,24 +656,6 @@ const SuggestionCard = ({
               + Add Tag
             </button>
           </div>
-        </div>
-
-        {/* Priority Toggles */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <button 
-            onClick={() => onEdit('is_urgent', !quote.is_urgent)}
-            className={`flex items-center justify-center gap-2 p-3 rounded-sm border-2 transition-all font-mono uppercase ${quote.is_urgent ? 'bg-amber-500 border-zinc-900 text-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]' : 'bg-stone-200 border-zinc-400 text-zinc-500'}`}
-          >
-            <AlertTriangle className="w-4 h-4" />
-            <span className="text-[10px] font-bold">Urgent</span>
-          </button>
-          <button 
-            onClick={() => onEdit('is_emergency', !quote.is_emergency)}
-            className={`flex items-center justify-center gap-2 p-3 rounded-sm border-2 transition-all font-mono uppercase ${quote.is_emergency ? 'bg-red-600 border-zinc-900 text-stone-100 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]' : 'bg-stone-200 border-zinc-400 text-zinc-500'}`}
-          >
-            <Zap className="w-4 h-4" />
-            <span className="text-[10px] font-bold uppercase">Emergency</span>
-          </button>
         </div>
 
         {quote.missing_items && quote.missing_items.length > 0 && (
@@ -427,6 +746,7 @@ export default function App() {
   const [loadingComparableLineId, setLoadingComparableLineId] = useState<string | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [inputType, setInputType] = useState<InputType>('typed');
+  const [routingDecision, setRoutingDecision] = useState<RoutingDecision | null>(null);
   const [history, setHistory] = usePersistentCollection<Partial<QuickQuote> & { id: string }>('quickQuotes', [
     {
       id: 'q_demo_1',
@@ -460,6 +780,10 @@ export default function App() {
   const [workOrders, setWorkOrders] = usePersistentCollection<WorkOrder>('workOrders', [
     {
       id: 'WO-demo-1',
+      title: 'AC Tune-up / Inspection',
+      customer_name: 'Acme Property Group',
+      address: '1428 Elm Street, Springfield',
+      created_at: '2026-04-10T15:30:00.000Z',
       quote_id: 'q_demo_1',
       customer_id: 'cust_1',
       job_type: 'AC Tune-up / Inspection',
@@ -477,8 +801,9 @@ export default function App() {
       tags: ['HVAC', 'Proposal'],
     },
   ]);
+  const [workOrderDetails, setWorkOrderDetails] = usePersistentCollection<WorkOrderDetailDraft>('workOrderDetails', []);
+  const [opsQueueItems, setOpsQueueItems] = usePersistentCollection<OpsQueueItem>('opsQueueItems', []);
   const [showHistory, setShowHistory] = useState(false);
-  const [showCalculator, setShowCalculator] = useState(false);
   const [showPhotoCapture, setShowPhotoCapture] = useState(false);
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [isEndOfDayModalOpen, setIsEndOfDayModalOpen] = useState(false);
@@ -547,6 +872,34 @@ export default function App() {
   const activeVendors = supabaseVendors.length > 0 ? supabaseVendors : vendors;
   const activeItems = supabaseItems.length > 0 ? supabaseItems : items;
   const selectedSupabaseJob = supabaseJobs.find(job => job.id === selectedSupabaseJobId);
+
+  const buildJobCandidates = (): JobMatchingCandidate[] => {
+    const localWorkOrders = workOrders.map(workOrder => {
+      const matchedCustomer = MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === workOrder.customer_id);
+      return {
+        id: workOrder.quote_id,
+        workOrderId: workOrder.id,
+        customerId: workOrder.customer_id,
+        customerName: workOrder.customer_name ?? matchedCustomer?.name,
+        address: workOrder.address ?? matchedCustomer?.address,
+        status: workOrder.status,
+        createdAt: workOrder.created_at ?? workOrder.scheduled_date ?? new Date().toISOString(),
+        location: matchedCustomer?.id === customer.id && suggestedQuote?.location
+          ? { latitude: suggestedQuote.location.latitude, longitude: suggestedQuote.location.longitude }
+          : undefined,
+      };
+    });
+
+    const remoteJobs = supabaseJobs.map(job => ({
+      id: job.id,
+      workOrderId: job.jobId,
+      customerName: job.customerName,
+      status: job.status,
+      createdAt: job.createdAt,
+    }));
+
+    return [...localWorkOrders, ...remoteJobs];
+  };
 
   const handleLoadComparableQuotes = async (lineId: string, itemId: string) => {
     if (!selectedSupabaseJobId) {
@@ -627,10 +980,41 @@ export default function App() {
     }
 
     const result = await interpretQuote(text, type);
+    const presence = {
+      timestamp: new Date().toISOString(),
+      location: locationData,
+      photoCount: suggestedQuote?.photos?.length ?? 0,
+      capturedBy: 'field-tech-demo',
+    };
+    const normalizedCapture = normalizeCapture({
+      text,
+      inputType: type,
+      presence,
+      customer,
+      selectedJobId: selectedSupabaseJobId,
+      quote: result,
+    });
+    const suggestedActions = detectSuggestedActions(normalizedCapture);
+    const jobMatch = matchJob({
+      normalizedCapture,
+      candidates: buildJobCandidates(),
+    });
+    const baseDecision = buildRoutingDecision(normalizedCapture, suggestedActions, jobMatch);
+    const decision: RoutingDecision = jobIntent === 'Urgent'
+      ? {
+          ...baseDecision,
+          urgency: 'urgent',
+          priority: baseDecision.isEmergency ? 'emergency' : 'urgent',
+          reasons: [
+            ...baseDecision.reasons.filter(reason => !reason.toLowerCase().includes('urgent flag')),
+            'Urgent flag raises queue priority.',
+          ],
+        }
+      : baseDecision;
     
     // Apply selected job intent/priority
-    result.is_urgent = jobIntent === 'Urgent';
-    result.is_emergency = jobIntent === 'Emergency';
+    result.is_urgent = jobIntent === 'Urgent' || decision.urgency === 'urgent';
+    result.is_emergency = jobIntent === 'Emergency' || decision.isEmergency;
     if (jobIntent === 'Proposal' || jobIntent === 'Complete') {
       if (!result.tags?.includes(jobIntent)) {
         result.tags = [...(result.tags || []), jobIntent];
@@ -648,6 +1032,7 @@ export default function App() {
       location: locationData,
       audit_trail: [auditEntry]
     });
+    setRoutingDecision(decision);
     setIsInterpreting(false);
   };
 
@@ -677,6 +1062,18 @@ export default function App() {
       updated.estimated_total = (updated.estimated_material_cost || 0) + 
                                 (updated.estimated_labor_cost || 0) + 
                                 (updated.estimated_subcontractor_cost || 0);
+    }
+
+    if (field === 'is_urgent' && routingDecision) {
+      setRoutingDecision({
+        ...routingDecision,
+        urgency: value ? 'urgent' : 'default',
+        priority: routingDecision.isEmergency ? 'emergency' : value ? 'urgent' : 'normal',
+        reasons: [
+          ...routingDecision.reasons.filter(reason => !reason.toLowerCase().includes('urgent flag')),
+          value ? 'Urgent flag raises queue priority.' : 'Default urgency.',
+        ],
+      });
     }
     
     setSuggestedQuote(updated);
@@ -748,6 +1145,7 @@ export default function App() {
     rememberPricesFromQuote(finalQuote, 'capture', finalQuote.id);
     setHistory([finalQuote, ...history]);
     setSuggestedQuote(null);
+    setRoutingDecision(null);
     setInputText('');
     setJobIntent('Proposal');
     // In a real app, this would send to a database
@@ -780,6 +1178,7 @@ export default function App() {
     rememberPricesFromQuote(finalQuote, 'capture', finalQuote.id);
     setHistory([finalQuote, ...history]);
     setSuggestedQuote(null);
+    setRoutingDecision(null);
     setInputText('');
     setJobIntent('Proposal');
     if (!suggestedQuote.is_emergency) {
@@ -787,9 +1186,52 @@ export default function App() {
     }
   };
 
-  const handleUseCalcResult = (result: string) => {
-    setInputText(prev => prev + (prev ? ' ' : '') + result);
-    setShowCalculator(false);
+  const handleExecuteSuggestedAction = (action: PrimaryAction) => {
+    if (!suggestedQuote || !routingDecision) return;
+
+    const actionDecision = buildRoutingDecision(
+      routingDecision.normalizedCapture,
+      routingDecision.suggestedActions.map(suggestion => ({
+        ...suggestion,
+        primary: suggestion.action === action,
+      })),
+      routingDecision.jobMatch
+    );
+    const auditEntry = {
+      timestamp: new Date().toISOString(),
+      action: 'Routed',
+      details: `${action.replace(/_/g, ' ')} routed to ${actionDecision.targetQueue.replace(/_/g, ' ')}.${actionDecision.priority !== 'normal' ? ` Priority: ${actionDecision.priority}.` : ''}`,
+    };
+    const finalQuote = {
+      ...suggestedQuote,
+      id: `q_${Date.now()}`,
+      customer_id: customer.id,
+      status: action === 'log_to_job' ? 'formalized' as const : 'reviewed' as const,
+      is_urgent: actionDecision.priority === 'urgent',
+      is_emergency: actionDecision.isEmergency,
+      created_at: new Date().toISOString(),
+      audit_trail: [...(suggestedQuote.audit_trail || []), auditEntry],
+    };
+    const queueItem = createOpsQueueItem(actionDecision, {
+      id: finalQuote.id,
+      suggested_job_type: finalQuote.suggested_job_type,
+      confidence_score: finalQuote.confidence_score,
+    });
+
+    rememberPricesFromQuote(finalQuote, 'capture', finalQuote.id);
+    setHistory([finalQuote, ...history]);
+    setOpsQueueItems([queueItem, ...opsQueueItems]);
+    setSuggestedQuote(null);
+    setRoutingDecision(null);
+    setInputText('');
+    setJobIntent('Proposal');
+
+    if (action === 'escalate_emergency') {
+      alert('Emergency escalated to the office queue immediately.');
+      return;
+    }
+
+    alert(`${queueItem.title} routed to ${queueItem.queue.replace(/_/g, ' ')}.`);
   };
 
   const handleCapturePhoto = (photo: string) => {
@@ -837,11 +1279,16 @@ export default function App() {
     setHistory(updatedHistory);
 
     // 2. Create Work Order
+    const matchedCustomer = MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === quote.customer_id);
     const newWO: WorkOrder = {
       id: `WO-${Date.now()}`,
+      title: quote.suggested_job_type ?? 'Untitled Work Order',
+      customer_name: matchedCustomer?.name ?? 'Customer placeholder',
+      address: matchedCustomer?.address,
+      created_at: new Date().toISOString(),
       quote_id: quote.id!,
       customer_id: quote.customer_id!,
-      job_type: quote.suggested_job_type!,
+      job_type: quote.suggested_job_type ?? 'Untitled Work Order',
       status: 'scheduled',
       vendorId: quote.vendorId,
       materials: quote.materials,
@@ -976,6 +1423,34 @@ export default function App() {
   }
 
   if (view === 'work-orders') {
+    const workOrder = workOrders[0] ?? {
+      id: 'WO-local-1',
+      title: 'First Work Order',
+      customer_name: 'Customer placeholder',
+      address: '',
+      created_at: new Date().toISOString(),
+      quote_id: 'local-placeholder',
+      customer_id: 'cust_1',
+      job_type: 'First Work Order',
+      status: 'scheduled' as const,
+    };
+
+    return (
+      <WorkOrderDetailShell
+        workOrder={workOrder}
+        detail={workOrderDetails.find(currentDetail => currentDetail.workOrderId === workOrder.id)}
+        onBack={() => setView('app')}
+        onSaveDetail={(savedDetail) => {
+          setWorkOrderDetails(currentDetails => {
+            const exists = currentDetails.some(currentDetail => currentDetail.workOrderId === savedDetail.workOrderId);
+            return exists
+              ? currentDetails.map(currentDetail => currentDetail.workOrderId === savedDetail.workOrderId ? savedDetail : currentDetail)
+              : [savedDetail, ...currentDetails];
+          });
+        }}
+      />
+    );
+
     return (
       <div className="min-h-screen bg-stone-200 flex flex-col max-w-md mx-auto shadow-2xl overflow-hidden font-sans">
         {/* Header */}
@@ -1085,6 +1560,7 @@ export default function App() {
           history={history}
           invoices={invoices}
           workOrders={workOrders}
+          opsQueueItems={opsQueueItems}
           vendors={activeVendors}
           items={activeItems}
           onFormalize={handleFormalize}
@@ -1172,38 +1648,18 @@ export default function App() {
       <div className="flex-1 overflow-y-auto pb-32">
         {/* Input Area */}
         <div className="p-4 bg-stone-200 border-b-4 border-zinc-900">
-          <div className="mb-4">
-            <label className="text-[10px] font-mono font-bold uppercase tracking-widest text-zinc-500 mb-1.5 block">Job Type / Priority</label>
-            <div className="relative">
-              <select 
-                value={jobIntent}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setJobIntent(val);
-                  if (suggestedQuote) {
-                    const updated = { ...suggestedQuote };
-                    updated.is_urgent = val === 'Urgent';
-                    updated.is_emergency = val === 'Emergency';
-                    
-                    // Add tag if not already present
-                    const currentTags = updated.tags || [];
-                    if (val === 'Proposal' || val === 'Complete') {
-                      if (!currentTags.includes(val)) {
-                        updated.tags = [...currentTags, val];
-                      }
-                    }
-                    setSuggestedQuote(updated);
-                  }
-                }}
-                className="w-full p-3 bg-stone-100 rounded-sm border-2 border-zinc-900 text-sm font-mono font-bold text-zinc-900 appearance-none focus:ring-2 focus:ring-orange-500 focus:outline-none pr-10 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]"
-              >
-                <option value="Proposal">Proposal</option>
-                <option value="Urgent">Urgent</option>
-                <option value="Emergency">Emergency</option>
-                <option value="Complete">Complete</option>
-              </select>
-              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-900 pointer-events-none" />
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-600">Field Capture</span>
+              <h2 className="font-oswald font-bold text-2xl text-zinc-900 uppercase tracking-wide">Say what happened</h2>
+              <p className="text-[10px] font-mono font-bold uppercase text-zinc-500 mt-1">GPS, time, and job context attach automatically.</p>
             </div>
+            <button
+              onClick={() => setJobIntent(jobIntent === 'Urgent' ? 'Proposal' : 'Urgent')}
+              className={`px-3 py-2 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest transition-all ${jobIntent === 'Urgent' ? 'bg-amber-500 text-zinc-900 shadow-[3px_3px_0px_0px_rgba(24,24,27,1)]' : 'bg-stone-100 text-zinc-600'}`}
+            >
+              {jobIntent === 'Urgent' ? 'Urgent On' : 'Mark Urgent'}
+            </button>
           </div>
           <div className="relative">
             <textarea
@@ -1235,8 +1691,6 @@ export default function App() {
           if (type === 'talk') toggleListening();
           if (type === 'type') { /* focus textarea */ }
           if (type === 'photo') setShowPhotoCapture(true);
-          if (type === 'budget') alert("Manual budget entry coming soon.");
-          if (type === 'calc') setShowCalculator(true);
         }} />
 
         {/* Status Overlay */}
@@ -1259,6 +1713,7 @@ export default function App() {
         {suggestedQuote && !isInterpreting && (
           <SuggestionCard
             quote={suggestedQuote}
+            routingDecision={routingDecision}
             vendors={activeVendors}
             items={activeItems}
             priceHistory={priceHistory}
@@ -1271,6 +1726,7 @@ export default function App() {
             loadingComparableLineId={loadingComparableLineId}
             comparisonError={comparisonError}
             onEdit={handleEdit}
+            onExecuteAction={handleExecuteSuggestedAction}
             onSelectedSupabaseJobChange={setSelectedSupabaseJobId}
             onOpenVendorManager={() => setShowVendorManager(true)}
             onSaveOutreachDraft={(draft) => {
@@ -1384,13 +1840,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Calculator View */}
-        <Calculator
-          isOpen={showCalculator}
-          onClose={() => setShowCalculator(false)}
-          onUseResult={handleUseCalcResult}
-        />
-
         <PhotoCapture
           isOpen={showPhotoCapture}
           onClose={() => setShowPhotoCapture(false)}
@@ -1412,25 +1861,6 @@ export default function App() {
         />
       </div>
 
-      {/* Bottom Actions */}
-      {suggestedQuote && !isInterpreting && (
-        <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto p-4 bg-stone-200 border-t-4 border-zinc-900 grid grid-cols-2 gap-3 z-30">
-          <button 
-            onClick={handleSave}
-            className="flex items-center justify-center gap-2 py-4 bg-stone-100 text-zinc-900 font-mono font-bold uppercase tracking-widest rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
-          >
-            <Save className="w-5 h-5" />
-            Save Draft
-          </button>
-          <button 
-            onClick={handleSendToOffice}
-            className="flex items-center justify-center gap-2 py-4 bg-orange-500 text-zinc-900 font-mono font-bold uppercase tracking-widest rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
-          >
-            <Send className="w-5 h-5" />
-            Send to Office
-          </button>
-        </div>
-      )}
     </div>
   );
 }

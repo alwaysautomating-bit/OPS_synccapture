@@ -3,6 +3,115 @@ export type InputType = 'typed' | 'voice';
 export type VendorCategory = 'HVAC' | 'Plumbing' | 'Electrical' | 'General Supply' | 'Subcontractor' | 'Rental' | 'Other';
 export type PriceMemorySourceType = 'capture' | 'work_order' | 'invoice' | 'manual';
 export type MaterialVarianceHandling = 'kept_entered' | 'used_last_known' | 'intentional';
+export type PrimaryAction = 'generate_proposal' | 'log_to_job' | 'notify_office' | 'escalate_emergency';
+export type CaptureUrgency = 'default' | 'urgent';
+export type OpsQueueName = 'proposals' | 'work_orders' | 'office_updates' | 'emergencies';
+export type JobMatchType = 'explicit_work_order' | 'customer_address' | 'gps_proximity' | 'recent_open_job' | 'none';
+
+export interface PresenceMetadata {
+  timestamp: string;
+  location?: {
+    latitude: number;
+    longitude: number;
+    accuracy?: number;
+  };
+  photoCount?: number;
+  capturedBy?: string;
+}
+
+export interface CaptureInput {
+  text: string;
+  inputType: InputType;
+  presence: PresenceMetadata;
+  customer?: Customer;
+  selectedJobId?: string;
+  currentWorkOrderId?: string;
+  quote?: Partial<QuickQuote>;
+}
+
+export interface JobMatchingCandidate {
+  id: string;
+  workOrderId?: string;
+  customerId?: string;
+  customerName?: string;
+  address?: string;
+  status?: string;
+  createdAt?: string;
+  location?: {
+    latitude: number;
+    longitude: number;
+  };
+}
+
+export interface NormalizedCapture {
+  rawText: string;
+  lowerText: string;
+  sourceInputType: InputType;
+  presence: PresenceMetadata;
+  explicitWorkOrderId?: string;
+  customerName?: string;
+  address?: string;
+  urgency: CaptureUrgency;
+  isEmergency: boolean;
+  confidence: number;
+  intentHints: string[];
+  extractedItems: string[];
+}
+
+export interface SuggestedAction {
+  action: PrimaryAction;
+  label: string;
+  queue: OpsQueueName;
+  confidence: number;
+  reason: string;
+  primary?: boolean;
+}
+
+export interface JobMatch {
+  jobId?: string;
+  workOrderId?: string;
+  customerId?: string;
+  customerName?: string;
+  address?: string;
+  matchType: JobMatchType;
+  confidence: number;
+  distanceMeters?: number;
+  source?: string;
+}
+
+export interface RoutingDecision {
+  id: string;
+  normalizedCapture: NormalizedCapture;
+  suggestedActions: SuggestedAction[];
+  primaryAction: PrimaryAction;
+  urgency: CaptureUrgency;
+  isEmergency: boolean;
+  priority: 'normal' | 'urgent' | 'emergency';
+  targetQueue: OpsQueueName;
+  jobMatch?: JobMatch;
+  reasons: string[];
+  createdAt: string;
+}
+
+export interface OpsQueueItem {
+  id: string;
+  queue: OpsQueueName;
+  action: PrimaryAction;
+  title: string;
+  summary: string;
+  status: 'new' | 'reviewing' | 'done';
+  priority: 'normal' | 'urgent' | 'emergency';
+  urgency: CaptureUrgency;
+  isEmergency: boolean;
+  quoteId?: string;
+  sourceInputText: string;
+  suggestedJobType?: string;
+  confidenceScore?: number;
+  jobMatch?: JobMatch;
+  proof: PresenceMetadata;
+  createdAt: string;
+  reasons: string[];
+}
 
 export interface VendorAlias {
   id: string;
@@ -123,6 +232,10 @@ export interface Invoice {
 
 export interface WorkOrder {
   id: string;
+  title?: string;
+  customer_name?: string;
+  address?: string;
+  created_at?: string;
   quote_id: string;
   customer_id: string;
   job_type: string;
@@ -132,6 +245,21 @@ export interface WorkOrder {
   vendorId?: string;
   materials?: MaterialLine[];
   tags?: string[];
+}
+
+export interface WorkOrderDetailDraft {
+  id: string;
+  workOrderId: string;
+  jobNotes: string;
+  todaysWork: string;
+  todaysPart?: string;
+  parts: {
+    name: string;
+    quantity: string;
+  }[];
+  photoNote?: string;
+  timeNote?: string;
+  updatedAt: string;
 }
 
 export interface QuickQuote {

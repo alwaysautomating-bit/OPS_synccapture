@@ -1,34 +1,64 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# SyncCapture
 
-# Run and deploy your AI Studio app
+SyncCapture is a mobile-first field capture prototype for turning technician notes, photos, proof of presence, and job context into office-side action queues.
 
-This contains everything you need to run your app locally.
+## Product Boundary
 
-View your app in AI Studio: https://ai.studio/apps/4c1873dc-a3dd-487a-bf89-86672857d5e5
+Field mode is for capture and intent. It should stay fast, low-friction, and action-first.
+
+Ops mode is for structure, pricing, review, formalization, and office-side execution.
+
+If a technician has to stop and fill out a long form, the product is drifting in the wrong direction.
+
+## Current Scope
+
+- Unified field capture input for typed or voice notes.
+- Photo, GPS, timestamp, and audit trail proof of presence.
+- Deterministic routing layer for suggested next actions.
+- Job matching by work order ID, customer/address, GPS proximity, and recent open job context.
+- Ops queues for proposals, work orders, office updates, and emergencies.
+- Supabase-backed vendor comparison slice for jobs, vendors, items, quote responses, and parts usage when configured.
+
+## Routing Actions
+
+- `generate_proposal` routes to `proposals`.
+- `log_to_job` routes to `work_orders`.
+- `notify_office` routes to `office_updates`.
+- `escalate_emergency` routes to `emergencies` and overrides normal routing.
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+Prerequisite: Node.js.
 
+```bash
+npm install
+npm run dev
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Set `GEMINI_API_KEY` in `.env.local` if you want live capture interpretation. Without it, the app uses deterministic mock interpretation for local development.
 
-## Supabase vendor comparison slice
+## Checks
 
-The first real data-backed loop uses Supabase for jobs, vendors, items, quote responses, and selected parts usage.
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+## Supabase Vendor Comparison Slice
+
+The data-backed loop uses Supabase for jobs, vendors, items, quote responses, and selected parts usage.
 
 1. Create a Supabase project.
-2. Run `supabase/migrations/202604120001_initial_vendor_comparison.sql` in the Supabase SQL editor or through the Supabase CLI.
-3. Run `supabase/seed/202604120001_vendor_comparison_seed.sql` to load the demo job, vendors, items, and quote responses.
+2. Run `supabase/migrations/202604120001_initial_vendor_comparison.sql`.
+3. Run `supabase/seed/202604120001_vendor_comparison_seed.sql`.
 4. Add these values to `.env.local`:
-   `VITE_SUPABASE_URL`
-   `VITE_SUPABASE_ANON_KEY`
+
+```bash
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
 5. Restart `npm run dev`.
 
 In the app, create or open a capture, add a material, pick the seeded Supabase job, and use Compare vendors to load quote responses. Choosing Use this vendor writes the selected quote into `parts_usage`.

@@ -232,6 +232,7 @@ export interface Invoice {
 
 export interface WorkOrder {
   id: string;
+  work_order_number?: string;
   title?: string;
   customer_name?: string;
   address?: string;
@@ -239,7 +240,7 @@ export interface WorkOrder {
   quote_id: string;
   customer_id: string;
   job_type: string;
-  status: 'scheduled' | 'in-progress' | 'completed';
+  status: 'scheduled' | 'in_progress' | 'completed';
   assigned_tech?: string;
   scheduled_date?: string;
   vendorId?: string;
@@ -247,19 +248,46 @@ export interface WorkOrder {
   tags?: string[];
 }
 
-export interface WorkOrderDetailDraft {
+export interface WorkOrderNote {
   id: string;
   workOrderId: string;
-  jobNotes: string;
-  todaysWork: string;
-  todaysPart?: string;
-  parts: {
-    name: string;
-    quantity: string;
-  }[];
-  photoNote?: string;
-  timeNote?: string;
-  updatedAt: string;
+  note: string;
+  createdAt: string;
+  createdBy?: string;
+}
+
+export interface WorkOrderWorkEntry {
+  id: string;
+  workOrderId: string;
+  summary: string;
+  optionalPart?: string;
+  photoAttached?: boolean;
+  createdAt: string;
+}
+
+export interface WorkOrderPart {
+  id: string;
+  workOrderId: string;
+  name: string;
+  quantity: number;
+  createdAt: string;
+}
+
+export interface WorkOrderAttachment {
+  id: string;
+  workOrderId: string;
+  source: 'camera' | 'upload';
+  note?: string;
+  previewUrl?: string;
+  createdAt: string;
+}
+
+export interface LaborSession {
+  id: string;
+  workOrderId: string;
+  started_at: string;
+  ended_at?: string;
+  durationMinutes?: number;
 }
 
 export interface QuickQuote {

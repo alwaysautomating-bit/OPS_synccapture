@@ -31,7 +31,7 @@ import {
   Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { QuickQuote, Customer, InputType, Invoice, WorkOrder, WorkOrderDetailDraft, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft, SupabaseJob, ComparableVendorQuote, RoutingDecision, PrimaryAction, OpsQueueItem, JobMatchingCandidate } from './types';
+import { QuickQuote, Customer, InputType, Invoice, WorkOrder, WorkOrderNote, WorkOrderWorkEntry, WorkOrderPart, WorkOrderAttachment, LaborSession, Vendor, Item, VendorItemPriceHistory, MaterialLine, SupplierOutreachDraft, SupabaseJob, ComparableVendorQuote, RoutingDecision, PrimaryAction, OpsQueueItem, JobMatchingCandidate } from './types';
 import { MOCK_CUSTOMERS, MOCK_ITEMS, MOCK_VENDOR_ITEM_PRICE_HISTORY, MOCK_VENDORS } from './mockData';
 import { usePersistentCollection } from './hooks/usePersistentCollection';
 import { isSupabaseConfigured } from './lib/env';
@@ -97,76 +97,182 @@ const QuickActions = ({ onAction }: { onAction: (type: 'talk' | 'type' | 'photo'
   </div>
 );
 
-type WorkOrderPanel = 'job-notes' | 'todays-work' | 'parts' | 'photos' | 'time';
+type WorkOrderPanel = 'job-notes' | 'todays-work' | 'parts' | 'photos' | 'work-session';
 
-const createBlankWorkOrderDraft = (workOrderId: string): WorkOrderDetailDraft => ({
-  id: `wod-${workOrderId}`,
-  workOrderId,
-  jobNotes: '',
-  todaysWork: '',
-  todaysPart: '',
-  parts: [{ name: '', quantity: '' }],
-  photoNote: '',
-  timeNote: '',
-  updatedAt: new Date().toISOString(),
-});
+const formatDuration = (minutes?: number) => {
+  if (!minutes || minutes < 1) return 'Less than 1 min';
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours === 0) return `${remainder} min`;
+  if (remainder === 0) return `${hours} hr`;
+  return `${hours} hr ${remainder} min`;
+};
+
+const getAttachmentPreview = (source: WorkOrderAttachment['source']) => (
+  source === 'camera'
+    ? 'linear-gradient(135deg, #f97316 0%, #18181b 100%)'
+    : 'linear-gradient(135deg, #a3e635 0%, #18181b 100%)'
+);
 
 const WorkOrderDetailShell = ({
   workOrder,
-  detail,
-  onSaveDetail,
+  notes,
+  workEntries,
+  parts,
+  attachments,
+  laborSessions,
+  onAddNote,
+  onAddWorkEntry,
+  onAddPart,
+  onAddAttachment,
+  onStartWork,
+  onFinishWork,
   onBack,
 }: {
   workOrder: WorkOrder;
-  detail?: WorkOrderDetailDraft;
-  onSaveDetail: (detail: WorkOrderDetailDraft) => void;
+  notes: WorkOrderNote[];
+  workEntries: WorkOrderWorkEntry[];
+  parts: WorkOrderPart[];
+  attachments: WorkOrderAttachment[];
+  laborSessions: LaborSession[];
+  onAddNote: (note: Omit<WorkOrderNote, 'id' | 'createdAt'>) => void;
+  onAddWorkEntry: (entry: Omit<WorkOrderWorkEntry, 'id' | 'createdAt'>) => void;
+  onAddPart: (part: Omit<WorkOrderPart, 'id' | 'createdAt'>) => void;
+  onAddAttachment: (attachment: Omit<WorkOrderAttachment, 'id' | 'createdAt'>) => void;
+  onStartWork: () => void;
+  onFinishWork: () => void;
   onBack: () => void;
 }) => {
   const [activePanel, setActivePanel] = useState<WorkOrderPanel | null>(null);
-  const [draft, setDraft] = useState<WorkOrderDetailDraft>(detail ?? createBlankWorkOrderDraft(workOrder.id));
-
-  useEffect(() => {
-    setDraft(detail ?? createBlankWorkOrderDraft(workOrder.id));
-  }, [detail, workOrder.id]);
+  const [noteText, setNoteText] = useState('');
+  const [workText, setWorkText] = useState('');
+  const [workPart, setWorkPart] = useState('');
+  const [workPhotoAttached, setWorkPhotoAttached] = useState(false);
+  const [partName, setPartName] = useState('');
+  const [partQuantity, setPartQuantity] = useState('1');
+  const [attachmentSource, setAttachmentSource] = useState<WorkOrderAttachment['source']>('camera');
+  const [attachmentNote, setAttachmentNote] = useState('');
+  const [panelMessage, setPanelMessage] = useState<string | null>(null);
 
   const title = workOrder.title ?? workOrder.job_type;
+  const workOrderNumber = workOrder.work_order_number ?? workOrder.id;
   const customerName = workOrder.customer_name ?? MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === workOrder.customer_id)?.name ?? 'Customer placeholder';
   const address = workOrder.address ?? MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === workOrder.customer_id)?.address;
   const createdAt = workOrder.created_at ?? workOrder.scheduled_date ?? new Date().toISOString();
+  const rawStatus = workOrder.status as WorkOrder['status'] | 'in-progress';
+  const normalizedStatus = rawStatus === 'in-progress' ? 'in_progress' : rawStatus;
+  const activeLaborSession = laborSessions.find(session => !session.ended_at);
+  const completedLaborSessions = laborSessions.filter(session => session.ended_at);
+  const latestCompletedSession = completedLaborSessions[0];
+  const canStartWork = normalizedStatus === 'scheduled' && !activeLaborSession;
+  const canFinishWork = normalizedStatus === 'in_progress' && Boolean(activeLaborSession);
   const panelLabels: Record<WorkOrderPanel, string> = {
     'job-notes': 'Job Notes',
     'todays-work': "Today's Work",
     parts: 'Parts',
     photos: 'Photos',
-    time: 'Time',
+    'work-session': 'Work Session',
   };
-  const panels: { id: WorkOrderPanel; icon: React.ElementType; label: string }[] = [
-    { id: 'job-notes', icon: FileText, label: 'Job Notes' },
-    { id: 'todays-work', icon: ClipboardList, label: "Today's Work" },
-    { id: 'parts', icon: Package, label: 'Parts' },
-    { id: 'photos', icon: ImageIcon, label: 'Photos' },
-    { id: 'time', icon: Clock, label: 'Time' },
+  const panels: { id: WorkOrderPanel; icon: React.ElementType; label: string; summary: string; detail?: string }[] = [
+    {
+      id: 'job-notes',
+      icon: FileText,
+      label: 'Job Notes',
+      summary: notes.length ? `${notes.length} saved` : 'No notes yet',
+      detail: notes[0]?.note,
+    },
+    {
+      id: 'todays-work',
+      icon: ClipboardList,
+      label: "Today's Work",
+      summary: workEntries.length ? `${workEntries.length} entries` : 'No work logged',
+      detail: workEntries[0]?.summary,
+    },
+    {
+      id: 'parts',
+      icon: Package,
+      label: 'Parts',
+      summary: parts.length ? `${parts.length} parts` : 'No parts added',
+      detail: parts.slice(0, 2).map(part => `${part.name} x${part.quantity}`).join(', '),
+    },
+    {
+      id: 'photos',
+      icon: ImageIcon,
+      label: 'Photos',
+      summary: attachments.length ? `${attachments.length} attached` : 'No photos attached',
+      detail: attachments[0]?.note,
+    },
+    {
+      id: 'work-session',
+      icon: Clock,
+      label: 'Work Session',
+      summary: activeLaborSession ? 'In progress' : latestCompletedSession ? `Last: ${formatDuration(latestCompletedSession.durationMinutes)}` : 'Not started',
+      detail: completedLaborSessions.length ? `${completedLaborSessions.length} completed` : undefined,
+    },
   ];
 
-  const saveDraft = () => {
-    onSaveDetail({ ...draft, updatedAt: new Date().toISOString() });
-    setActivePanel(null);
+  const showSaved = (message: string) => {
+    setPanelMessage(message);
+    window.setTimeout(() => setPanelMessage(null), 1800);
   };
 
-  const updatePart = (index: number, field: 'name' | 'quantity', value: string) => {
-    setDraft(currentDraft => ({
-      ...currentDraft,
-      parts: currentDraft.parts.map((part, currentIndex) => (
-        currentIndex === index ? { ...part, [field]: value } : part
-      )),
-    }));
+  const handleOpenPanel = (panel: WorkOrderPanel) => {
+    setPanelMessage(null);
+    setActivePanel(panel);
   };
 
-  const addPartRow = () => {
-    setDraft(currentDraft => ({
-      ...currentDraft,
-      parts: [...currentDraft.parts, { name: '', quantity: '' }],
-    }));
+  const handleSaveNote = () => {
+    const trimmedNote = noteText.trim();
+    if (!trimmedNote) return;
+    onAddNote({ workOrderId: workOrder.id, note: trimmedNote, createdBy: 'Field tech' });
+    setNoteText('');
+    showSaved('Note saved');
+  };
+
+  const handleSaveWorkEntry = () => {
+    const trimmedWork = workText.trim();
+    if (!trimmedWork) return;
+    onAddWorkEntry({
+      workOrderId: workOrder.id,
+      summary: trimmedWork,
+      optionalPart: workPart.trim() || undefined,
+      photoAttached: workPhotoAttached,
+    });
+    setWorkText('');
+    setWorkPart('');
+    setWorkPhotoAttached(false);
+    showSaved('Work entry saved');
+  };
+
+  const handleSavePart = () => {
+    const trimmedName = partName.trim();
+    const quantity = Number(partQuantity);
+    if (!trimmedName || Number.isNaN(quantity) || quantity <= 0) return;
+    onAddPart({ workOrderId: workOrder.id, name: trimmedName, quantity });
+    setPartName('');
+    setPartQuantity('1');
+    showSaved('Part saved');
+  };
+
+  const handleSaveAttachment = () => {
+    onAddAttachment({
+      workOrderId: workOrder.id,
+      source: attachmentSource,
+      note: attachmentNote.trim() || undefined,
+      previewUrl: getAttachmentPreview(attachmentSource),
+    });
+    setAttachmentNote('');
+    showSaved('Photo attached');
+  };
+
+  const handleStartWork = () => {
+    onStartWork();
+    showSaved('Work session started');
+  };
+
+  const handleFinishWork = () => {
+    onFinishWork();
+    showSaved('Work session finished');
   };
 
   return (
@@ -193,11 +299,11 @@ const WorkOrderDetailShell = ({
         <section className="p-5 bg-zinc-900 text-stone-100 border-b-4 border-orange-500">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
-              <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-500">{workOrder.id}</p>
+              <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-500">{workOrderNumber}</p>
               <h2 className="mt-1 font-oswald text-4xl font-bold uppercase leading-none break-words">{title}</h2>
             </div>
             <span className="shrink-0 px-2 py-1 bg-stone-100 text-zinc-900 rounded-sm border-2 border-orange-500 text-[10px] font-mono font-bold uppercase tracking-widest">
-              {workOrder.status}
+              {normalizedStatus.replace('_', ' ')}
             </span>
           </div>
           <div className="mt-4 space-y-1 text-[11px] font-mono font-bold uppercase tracking-wide text-zinc-300">
@@ -216,14 +322,26 @@ const WorkOrderDetailShell = ({
               Created {new Date(createdAt).toLocaleDateString()}
             </p>
           </div>
-          <div className="mt-5 grid grid-cols-2 gap-2">
-            <button className="py-3 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest opacity-60">
-              Start Work
-            </button>
-            <button className="py-3 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest opacity-60">
-              Finish Today's Work
-            </button>
-          </div>
+          {normalizedStatus !== 'completed' && (
+            <div className="mt-5">
+              {canStartWork && (
+                <button
+                  onClick={handleStartWork}
+                  className="w-full py-3 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest shadow-[3px_3px_0px_0px_rgba(250,250,249,0.35)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  Start Work
+                </button>
+              )}
+              {canFinishWork && (
+                <button
+                  onClick={handleFinishWork}
+                  className="w-full py-3 bg-lime-500 text-zinc-900 rounded-sm border-2 border-zinc-900 text-[10px] font-mono font-bold uppercase tracking-widest shadow-[3px_3px_0px_0px_rgba(250,250,249,0.35)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  Finish Today's Work
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="p-4 space-y-3">
@@ -232,16 +350,22 @@ const WorkOrderDetailShell = ({
             return (
               <button
                 key={panel.id}
-                onClick={() => setActivePanel(panel.id)}
-                className="w-full bg-stone-100 border-2 border-zinc-900 rounded-sm shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] p-4 flex items-center justify-between text-left active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                onClick={() => handleOpenPanel(panel.id)}
+                className="w-full bg-stone-100 border-2 border-zinc-900 rounded-sm shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] p-4 flex items-start justify-between gap-3 text-left active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
               >
-                <span className="flex items-center gap-3">
+                <span className="flex items-start gap-3 min-w-0">
                   <span className="w-10 h-10 bg-stone-200 border-2 border-zinc-900 rounded-sm flex items-center justify-center text-orange-600">
                     <Icon className="w-5 h-5" />
                   </span>
-                  <span className="font-oswald text-xl font-bold uppercase tracking-wide text-zinc-900">{panel.label}</span>
+                  <span className="min-w-0">
+                    <span className="block font-oswald text-xl font-bold uppercase tracking-wide text-zinc-900">{panel.label}</span>
+                    <span className="block mt-0.5 text-[10px] font-mono font-bold uppercase tracking-widest text-orange-600">{panel.summary}</span>
+                    {panel.detail && (
+                      <span className="block mt-1 text-xs font-mono text-zinc-500 line-clamp-2">{panel.detail}</span>
+                    )}
+                  </span>
                 </span>
-                <ChevronRight className="w-5 h-5 text-zinc-500" />
+                <ChevronRight className="w-5 h-5 text-zinc-500 shrink-0 mt-2" />
               </button>
             );
           })}
@@ -258,7 +382,12 @@ const WorkOrderDetailShell = ({
             className="fixed inset-0 z-50 bg-stone-200 flex flex-col max-w-md mx-auto shadow-2xl border-x-2 border-zinc-900"
           >
             <div className="bg-stone-100 px-4 py-4 border-b-4 border-zinc-900 flex items-center justify-between shadow-[0px_4px_0px_0px_rgba(24,24,27,1)]">
-              <h3 className="font-oswald font-bold text-2xl text-zinc-900 uppercase">{panelLabels[activePanel]}</h3>
+              <div>
+                <h3 className="font-oswald font-bold text-2xl text-zinc-900 uppercase">{panelLabels[activePanel]}</h3>
+                {panelMessage && (
+                  <p className="mt-1 text-[10px] font-mono font-bold uppercase tracking-widest text-lime-700">{panelMessage}</p>
+                )}
+              </div>
               <button
                 onClick={() => setActivePanel(null)}
                 className="w-10 h-10 border-2 border-zinc-900 rounded-sm bg-stone-200 flex items-center justify-center"
@@ -270,113 +399,222 @@ const WorkOrderDetailShell = ({
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
               {activePanel === 'job-notes' && (
                 <>
+                  <p className="text-xs font-mono font-bold uppercase leading-relaxed text-zinc-600">
+                    Persistent notes stay with this job for future visits and future techs.
+                  </p>
                   <textarea
-                    value={draft.jobNotes}
-                    onChange={(event) => setDraft({ ...draft, jobNotes: event.target.value })}
+                    value={noteText}
+                    onChange={(event) => setNoteText(event.target.value)}
                     placeholder="Job notes"
                     className="w-full min-h-[320px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
                   />
                   <button className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2">
                     <Mic className="w-5 h-5 text-orange-600" />
-                    Voice
+                    Record Note
                   </button>
+                  {notes.length > 0 && (
+                    <div className="space-y-2">
+                      {notes.slice(0, 3).map(note => (
+                        <div key={note.id} className="p-3 bg-stone-100 border-2 border-zinc-900 rounded-sm">
+                          <p className="text-sm font-mono text-zinc-900">{note.note}</p>
+                          <p className="mt-2 text-[9px] font-mono font-bold uppercase text-zinc-500">{new Date(note.createdAt).toLocaleString()}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
 
               {activePanel === 'todays-work' && (
                 <>
                   <textarea
-                    value={draft.todaysWork}
-                    onChange={(event) => setDraft({ ...draft, todaysWork: event.target.value })}
-                    placeholder="What was done"
+                    value={workText}
+                    onChange={(event) => setWorkText(event.target.value)}
+                    placeholder="What did you do?"
                     className="w-full min-h-[240px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
                   />
                   <input
-                    value={draft.todaysPart}
-                    onChange={(event) => setDraft({ ...draft, todaysPart: event.target.value })}
+                    value={workPart}
+                    onChange={(event) => setWorkPart(event.target.value)}
                     placeholder="Optional part"
                     className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />
-                  <button className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2">
+                  <button
+                    onClick={() => setWorkPhotoAttached(current => !current)}
+                    className={`w-full py-4 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 ${workPhotoAttached ? 'bg-lime-500 text-zinc-900' : 'bg-stone-100 text-zinc-900'}`}
+                  >
                     <Camera className="w-5 h-5 text-orange-600" />
-                    Optional Photo
+                    {workPhotoAttached ? 'Photo Marked' : 'Optional Photo'}
                   </button>
+                  {workEntries.length > 0 && (
+                    <div className="space-y-2">
+                      {workEntries.slice(0, 3).map(entry => (
+                        <div key={entry.id} className="p-3 bg-stone-100 border-2 border-zinc-900 rounded-sm">
+                          <p className="text-sm font-mono text-zinc-900">{entry.summary}</p>
+                          <p className="mt-2 text-[9px] font-mono font-bold uppercase text-zinc-500">
+                            {entry.optionalPart ? `Part: ${entry.optionalPart}` : 'No part'} {entry.photoAttached ? ' / Photo attached' : ''}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
 
               {activePanel === 'parts' && (
                 <div className="space-y-3">
-                  {draft.parts.map((part, index) => (
-                    <div key={index} className="grid grid-cols-[1fr_88px] gap-2">
-                      <input
-                        value={part.name}
-                        onChange={(event) => updatePart(index, 'name', event.target.value)}
-                        placeholder="Part name"
-                        className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
-                      />
-                      <input
-                        value={part.quantity}
-                        onChange={(event) => updatePart(index, 'quantity', event.target.value)}
-                        placeholder="Qty"
-                        className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
-                      />
+                  <div className="grid grid-cols-[1fr_88px] gap-2">
+                    <input
+                      value={partName}
+                      onChange={(event) => setPartName(event.target.value)}
+                      placeholder="Part name"
+                      className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                    <input
+                      type="number"
+                      min="1"
+                      value={partQuantity}
+                      onChange={(event) => setPartQuantity(event.target.value)}
+                      placeholder="Qty"
+                      className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                  </div>
+                  {parts.length > 0 && (
+                    <div className="space-y-2">
+                      {parts.map(part => (
+                        <div key={part.id} className="p-3 bg-stone-100 border-2 border-zinc-900 rounded-sm flex items-center justify-between">
+                          <span className="font-mono text-sm font-bold text-zinc-900">{part.name}</span>
+                          <span className="font-mono text-xs font-bold uppercase text-orange-600">Qty {part.quantity}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                  <button
-                    onClick={addPartRow}
-                    className="w-full py-4 bg-stone-100 text-zinc-900 rounded-sm border-2 border-dashed border-zinc-900 font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2"
-                  >
-                    <Plus className="w-5 h-5 text-orange-600" />
-                    Add Part
-                  </button>
+                  )}
                 </div>
               )}
 
               {activePanel === 'photos' && (
                 <>
-                  <button className="w-full min-h-[140px] bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3">
+                  <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setAttachmentSource('camera')}
+                    className={`min-h-[140px] text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3 ${attachmentSource === 'camera' ? 'bg-orange-500' : 'bg-stone-100'}`}
+                  >
                     <Camera className="w-8 h-8 text-orange-600" />
                     Camera
                   </button>
-                  <button className="w-full min-h-[140px] bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3">
+                  <button
+                    onClick={() => setAttachmentSource('upload')}
+                    className={`min-h-[140px] text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest flex flex-col items-center justify-center gap-3 ${attachmentSource === 'upload' ? 'bg-orange-500' : 'bg-stone-100'}`}
+                  >
                     <Upload className="w-8 h-8 text-orange-600" />
                     Upload
                   </button>
+                  </div>
                   <input
-                    value={draft.photoNote}
-                    onChange={(event) => setDraft({ ...draft, photoNote: event.target.value })}
+                    value={attachmentNote}
+                    onChange={(event) => setAttachmentNote(event.target.value)}
                     placeholder="Photo note"
                     className="w-full p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />
+                  {attachments.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {attachments.slice(0, 6).map(attachment => (
+                        <div key={attachment.id} className="aspect-square rounded-sm border-2 border-zinc-900 overflow-hidden bg-stone-100">
+                          <div className="h-full w-full flex items-end p-2" style={{ background: attachment.previewUrl ?? getAttachmentPreview(attachment.source) }}>
+                            <span className="text-[8px] font-mono font-bold uppercase text-stone-100">{attachment.source}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
 
-              {activePanel === 'time' && (
+              {activePanel === 'work-session' && (
                 <>
-                  <button className="w-full py-5 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest opacity-70">
-                    Start Work
-                  </button>
-                  <button className="w-full py-5 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest opacity-70">
-                    Finish Today's Work
-                  </button>
-                  <textarea
-                    value={draft.timeNote}
-                    onChange={(event) => setDraft({ ...draft, timeNote: event.target.value })}
-                    placeholder="Time note"
-                    className="w-full min-h-[180px] p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 font-mono text-sm text-zinc-900 focus:outline-none focus:ring-2 focus:ring-orange-500 resize-none"
-                  />
+                  {canStartWork && (
+                    <button
+                      onClick={handleStartWork}
+                      className="w-full py-5 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                    >
+                      Start Work
+                    </button>
+                  )}
+                  {canFinishWork && (
+                    <button
+                      onClick={handleFinishWork}
+                      className="w-full py-5 bg-lime-500 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                    >
+                      Finish Today's Work
+                    </button>
+                  )}
+                  {activeLaborSession && (
+                    <div className="p-4 bg-zinc-900 text-stone-100 rounded-sm border-2 border-zinc-900">
+                      <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-500">Started</p>
+                      <p className="mt-1 font-oswald text-2xl font-bold uppercase">{new Date(activeLaborSession.started_at).toLocaleTimeString()}</p>
+                    </div>
+                  )}
+                  {latestCompletedSession && (
+                    <div className="p-4 bg-stone-100 rounded-sm border-2 border-zinc-900">
+                      <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-lime-700">Completed Session</p>
+                      <p className="mt-1 font-oswald text-3xl font-bold uppercase text-zinc-900">{formatDuration(latestCompletedSession.durationMinutes)}</p>
+                    </div>
+                  )}
+                  {normalizedStatus === 'completed' && (
+                    <p className="p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 text-xs font-mono font-bold uppercase text-zinc-600">This work order is completed.</p>
+                  )}
                 </>
               )}
             </div>
 
             <div className="p-4 bg-stone-100 border-t-4 border-zinc-900">
-              <button
-                onClick={saveDraft}
-                className="w-full py-4 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
-              >
-                <Save className="w-5 h-5" />
-                Save
-              </button>
+              {activePanel === 'job-notes' && (
+                <button
+                  onClick={handleSaveNote}
+                  disabled={!noteText.trim()}
+                  className="w-full py-4 bg-orange-500 disabled:bg-stone-300 disabled:text-zinc-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  <Save className="w-5 h-5" />
+                  Save Note
+                </button>
+              )}
+              {activePanel === 'todays-work' && (
+                <button
+                  onClick={handleSaveWorkEntry}
+                  disabled={!workText.trim()}
+                  className="w-full py-4 bg-orange-500 disabled:bg-stone-300 disabled:text-zinc-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  <Save className="w-5 h-5" />
+                  Save Work
+                </button>
+              )}
+              {activePanel === 'parts' && (
+                <button
+                  onClick={handleSavePart}
+                  disabled={!partName.trim()}
+                  className="w-full py-4 bg-orange-500 disabled:bg-stone-300 disabled:text-zinc-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  <Plus className="w-5 h-5" />
+                  Save Part
+                </button>
+              )}
+              {activePanel === 'photos' && (
+                <button
+                  onClick={handleSaveAttachment}
+                  className="w-full py-4 bg-orange-500 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] font-mono font-bold uppercase tracking-widest flex items-center justify-center gap-2 active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                >
+                  <Save className="w-5 h-5" />
+                  Save Photo
+                </button>
+              )}
+              {activePanel === 'work-session' && (
+                <button
+                  onClick={() => setActivePanel(null)}
+                  className="w-full py-4 bg-stone-200 text-zinc-900 rounded-sm border-2 border-zinc-900 font-mono font-bold uppercase tracking-widest"
+                >
+                  Done
+                </button>
+              )}
             </div>
           </motion.div>
         )}
@@ -780,6 +1018,7 @@ export default function App() {
   const [workOrders, setWorkOrders] = usePersistentCollection<WorkOrder>('workOrders', [
     {
       id: 'WO-demo-1',
+      work_order_number: 'WO-1001',
       title: 'AC Tune-up / Inspection',
       customer_name: 'Acme Property Group',
       address: '1428 Elm Street, Springfield',
@@ -801,7 +1040,11 @@ export default function App() {
       tags: ['HVAC', 'Proposal'],
     },
   ]);
-  const [workOrderDetails, setWorkOrderDetails] = usePersistentCollection<WorkOrderDetailDraft>('workOrderDetails', []);
+  const [workOrderNotes, setWorkOrderNotes] = usePersistentCollection<WorkOrderNote>('workOrderNotes', []);
+  const [workOrderWorkEntries, setWorkOrderWorkEntries] = usePersistentCollection<WorkOrderWorkEntry>('workOrderWorkEntries', []);
+  const [workOrderParts, setWorkOrderParts] = usePersistentCollection<WorkOrderPart>('workOrderParts', []);
+  const [workOrderAttachments, setWorkOrderAttachments] = usePersistentCollection<WorkOrderAttachment>('workOrderAttachments', []);
+  const [laborSessions, setLaborSessions] = usePersistentCollection<LaborSession>('laborSessions', []);
   const [opsQueueItems, setOpsQueueItems] = usePersistentCollection<OpsQueueItem>('opsQueueItems', []);
   const [showHistory, setShowHistory] = useState(false);
   const [showPhotoCapture, setShowPhotoCapture] = useState(false);
@@ -1282,6 +1525,7 @@ export default function App() {
     const matchedCustomer = MOCK_CUSTOMERS.find(currentCustomer => currentCustomer.id === quote.customer_id);
     const newWO: WorkOrder = {
       id: `WO-${Date.now()}`,
+      work_order_number: `WO-${Date.now().toString().slice(-6)}`,
       title: quote.suggested_job_type ?? 'Untitled Work Order',
       customer_name: matchedCustomer?.name ?? 'Customer placeholder',
       address: matchedCustomer?.address,
@@ -1418,6 +1662,86 @@ export default function App() {
 
   const getVendor = (vendorId?: string) => activeVendors.find(vendor => vendor.id === vendorId);
 
+  const updateWorkOrderStatus = (workOrderId: string, status: WorkOrder['status']) => {
+    setWorkOrders(currentWorkOrders => currentWorkOrders.map(currentWorkOrder => (
+      currentWorkOrder.id === workOrderId ? { ...currentWorkOrder, status } : currentWorkOrder
+    )));
+  };
+
+  const handleAddWorkOrderNote = (note: Omit<WorkOrderNote, 'id' | 'createdAt'>) => {
+    setWorkOrderNotes(currentNotes => [
+      {
+        ...note,
+        id: `won-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...currentNotes,
+    ]);
+  };
+
+  const handleAddWorkOrderWorkEntry = (entry: Omit<WorkOrderWorkEntry, 'id' | 'createdAt'>) => {
+    setWorkOrderWorkEntries(currentEntries => [
+      {
+        ...entry,
+        id: `wowe-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...currentEntries,
+    ]);
+  };
+
+  const handleAddWorkOrderPart = (part: Omit<WorkOrderPart, 'id' | 'createdAt'>) => {
+    setWorkOrderParts(currentParts => [
+      {
+        ...part,
+        id: `wop-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...currentParts,
+    ]);
+  };
+
+  const handleAddWorkOrderAttachment = (attachment: Omit<WorkOrderAttachment, 'id' | 'createdAt'>) => {
+    setWorkOrderAttachments(currentAttachments => [
+      {
+        ...attachment,
+        id: `woa-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...currentAttachments,
+    ]);
+  };
+
+  const handleStartLaborSession = (workOrderId: string) => {
+    const alreadyActive = laborSessions.some(session => session.workOrderId === workOrderId && !session.ended_at);
+    if (alreadyActive) return;
+
+    setLaborSessions(currentSessions => [
+      {
+        id: `labor-${Date.now()}`,
+        workOrderId,
+        started_at: new Date().toISOString(),
+      },
+      ...currentSessions,
+    ]);
+    updateWorkOrderStatus(workOrderId, 'in_progress');
+  };
+
+  const handleFinishLaborSession = (workOrderId: string) => {
+    const endedAt = new Date();
+    setLaborSessions(currentSessions => currentSessions.map(session => {
+      if (session.workOrderId !== workOrderId || session.ended_at) return session;
+      const startedAt = new Date(session.started_at);
+      const durationMinutes = Math.max(1, Math.round((endedAt.getTime() - startedAt.getTime()) / 60000));
+      return {
+        ...session,
+        ended_at: endedAt.toISOString(),
+        durationMinutes,
+      };
+    }));
+    updateWorkOrderStatus(workOrderId, 'scheduled');
+  };
+
   if (view === 'landing') {
     return <LandingPage onStart={() => setView('app')} />;
   }
@@ -1425,6 +1749,7 @@ export default function App() {
   if (view === 'work-orders') {
     const workOrder = workOrders[0] ?? {
       id: 'WO-local-1',
+      work_order_number: 'WO-LOCAL-1',
       title: 'First Work Order',
       customer_name: 'Customer placeholder',
       address: '',
@@ -1438,94 +1763,19 @@ export default function App() {
     return (
       <WorkOrderDetailShell
         workOrder={workOrder}
-        detail={workOrderDetails.find(currentDetail => currentDetail.workOrderId === workOrder.id)}
+        notes={workOrderNotes.filter(note => note.workOrderId === workOrder.id)}
+        workEntries={workOrderWorkEntries.filter(entry => entry.workOrderId === workOrder.id)}
+        parts={workOrderParts.filter(part => part.workOrderId === workOrder.id)}
+        attachments={workOrderAttachments.filter(attachment => attachment.workOrderId === workOrder.id)}
+        laborSessions={laborSessions.filter(session => session.workOrderId === workOrder.id)}
         onBack={() => setView('app')}
-        onSaveDetail={(savedDetail) => {
-          setWorkOrderDetails(currentDetails => {
-            const exists = currentDetails.some(currentDetail => currentDetail.workOrderId === savedDetail.workOrderId);
-            return exists
-              ? currentDetails.map(currentDetail => currentDetail.workOrderId === savedDetail.workOrderId ? savedDetail : currentDetail)
-              : [savedDetail, ...currentDetails];
-          });
-        }}
+        onAddNote={handleAddWorkOrderNote}
+        onAddWorkEntry={handleAddWorkOrderWorkEntry}
+        onAddPart={handleAddWorkOrderPart}
+        onAddAttachment={handleAddWorkOrderAttachment}
+        onStartWork={() => handleStartLaborSession(workOrder.id)}
+        onFinishWork={() => handleFinishLaborSession(workOrder.id)}
       />
-    );
-
-    return (
-      <div className="min-h-screen bg-stone-200 flex flex-col max-w-md mx-auto shadow-2xl overflow-hidden font-sans">
-        {/* Header */}
-        <div className="bg-stone-100 px-4 py-3 border-b-4 border-zinc-900 flex items-center justify-between sticky top-0 z-20 shadow-[0px_4px_0px_0px_rgba(24,24,27,1)]">
-          <button 
-            onClick={() => setView('app')}
-            className="flex items-center gap-3 hover:opacity-80 transition-opacity"
-          >
-            <div className="w-8 h-8 bg-orange-500 border-2 border-zinc-900 flex items-center justify-center transform -skew-x-12">
-              <div className="w-2 h-2 bg-zinc-900"></div>
-            </div>
-            <h1 className="font-oswald font-bold text-xl tracking-widest text-zinc-900 uppercase">SYNC<span className="text-orange-600">-</span>CAPTURE</h1>
-          </button>
-          <button 
-            onClick={() => setView('app')}
-            className="p-2 text-orange-600 font-mono font-bold text-xs uppercase tracking-widest hover:text-orange-700 transition-colors"
-          >
-            Back to Field
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center justify-center text-center">
-          <div className="w-20 h-20 bg-stone-100 border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] rounded-sm flex items-center justify-center text-orange-500 mb-6">
-            <ClipboardList className="w-10 h-10" />
-          </div>
-          <h2 className="text-3xl font-oswald font-bold text-zinc-900 mb-2 uppercase">Work Orders</h2>
-          <p className="text-zinc-500 font-mono mb-8 max-w-[240px] uppercase text-xs">
-            This view is currently being configured. Soon you'll be able to see all active work orders here.
-          </p>
-          
-          <div className="w-full space-y-3">
-            {workOrders.length === 0 ? (
-              [1, 2, 3].map(i => (
-                <div key={i} className="p-4 bg-stone-100 rounded-sm border-2 border-zinc-300 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] flex items-center gap-4 opacity-40 grayscale">
-                  <div className="w-10 h-10 bg-stone-200 border-2 border-zinc-300 rounded-sm" />
-                  <div className="flex-1 text-left">
-                    <div className="h-3 w-24 bg-stone-200 rounded-sm mb-2" />
-                    <div className="h-2 w-32 bg-stone-200 rounded-sm" />
-                  </div>
-                </div>
-              ))
-            ) : (
-              workOrders.map(wo => (
-                <div key={wo.id} className="p-4 bg-stone-100 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] flex items-center justify-between">
-                  <div>
-                    <h4 className="font-oswald font-bold text-lg text-zinc-900 uppercase">{wo.job_type}</h4>
-                    <p className="text-[10px] text-orange-600 uppercase font-mono font-bold tracking-widest">{wo.status}</p>
-                    {getVendor(wo.vendorId) && (
-                      <p className="text-[10px] text-zinc-500 uppercase font-mono font-bold mt-1 flex items-center gap-1">
-                        <Truck className="w-3 h-3 text-orange-500" />
-                        {getVendor(wo.vendorId)?.name}
-                      </p>
-                    )}
-                    {wo.materials && wo.materials.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {wo.materials.map(line => {
-                          const materialItem = activeItems.find(currentItem => currentItem.id === line.itemId);
-                          return (
-                            <span key={line.id} className="px-1.5 py-0.5 bg-stone-200 text-zinc-700 text-[8px] font-mono font-bold rounded-sm uppercase border-2 border-zinc-400">
-                              {materialItem?.canonicalName ?? 'Material'} · {line.quantity}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-mono font-bold text-zinc-500 uppercase">ID: {wo.id}</p>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
     );
   }
 

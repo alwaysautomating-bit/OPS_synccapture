@@ -97,6 +97,13 @@ const QuickActions = ({ onAction }: { onAction: (type: 'talk' | 'type' | 'photo'
   </div>
 );
 
+interface DraftAttachment {
+  id: string;
+  kind: 'photo' | 'image' | 'file';
+  name: string;
+  previewUrl?: string;
+}
+
 type WorkOrderPanel = 'job-notes' | 'todays-work' | 'parts' | 'photos' | 'work-session';
 
 const formatDuration = (minutes?: number) => {
@@ -1048,12 +1055,16 @@ export default function App() {
   const [opsQueueItems, setOpsQueueItems] = usePersistentCollection<OpsQueueItem>('opsQueueItems', []);
   const [showHistory, setShowHistory] = useState(false);
   const [showPhotoCapture, setShowPhotoCapture] = useState(false);
+  const [showAttachmentSheet, setShowAttachmentSheet] = useState(false);
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [isEndOfDayModalOpen, setIsEndOfDayModalOpen] = useState(false);
   const [showProfitRealityCheck, setShowProfitRealityCheck] = useState(false);
   const [messyInputs, setMessyInputs] = useState<Partial<QuickQuote>[]>([]);
 
   const recognitionRef = useRef<any>(null);
+  const imageUploadRef = useRef<HTMLInputElement>(null);
+  const fileUploadRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
@@ -1478,6 +1489,15 @@ export default function App() {
   };
 
   const handleCapturePhoto = (photo: string) => {
+    setDraftAttachments(currentAttachments => [
+      {
+        id: `draft-photo-${Date.now()}`,
+        kind: 'photo',
+        name: `Photo ${currentAttachments.length + 1}`,
+        previewUrl: photo,
+      },
+      ...currentAttachments,
+    ]);
     if (!suggestedQuote) {
       // If no quote exists, create a placeholder one to attach the photo to
       setSuggestedQuote({
@@ -1512,6 +1532,42 @@ export default function App() {
       });
     }
     setShowPhotoCapture(false);
+    setShowAttachmentSheet(false);
+  };
+
+  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === 'string') {
+        handleCapturePhoto(result);
+      }
+    };
+    reader.readAsDataURL(file);
+    event.target.value = '';
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setDraftAttachments(currentAttachments => [
+      {
+        id: `draft-file-${Date.now()}`,
+        kind: 'file',
+        name: file.name,
+      },
+      ...currentAttachments,
+    ]);
+    setInputText(currentText => {
+      const attachmentLine = `[Attached file: ${file.name}]`;
+      return currentText.trim() ? `${currentText}\n${attachmentLine}` : attachmentLine;
+    });
+    setShowAttachmentSheet(false);
+    event.target.value = '';
   };
 
   const handleFormalize = (quote: Partial<QuickQuote>) => {
@@ -1918,6 +1974,35 @@ export default function App() {
               placeholder="AWAITING INPUT..."
               className="w-full min-h-[240px] p-6 bg-stone-100 rounded-sm border-2 border-zinc-900 focus:ring-2 focus:ring-orange-500 text-zinc-900 font-mono placeholder:text-zinc-400 resize-none text-lg shadow-[4px_4px_0px_0px_rgba(24,24,27,1)]"
             />
+            {draftAttachments.length > 0 && (
+              <div className="absolute left-4 right-20 bottom-3 flex flex-wrap gap-2">
+                {draftAttachments.slice(0, 3).map(attachment => (
+                  <div key={attachment.id} className="flex items-center gap-2 px-2 py-1 bg-stone-200 border-2 border-zinc-900 rounded-sm max-w-[150px]">
+                    {attachment.previewUrl ? (
+                      <img
+                        src={attachment.previewUrl}
+                        alt={attachment.name}
+                        className="w-8 h-8 object-cover rounded-sm border border-zinc-900"
+                        referrerPolicy="no-referrer"
+                      />
+                    ) : (
+                      <div className="w-8 h-8 rounded-sm border border-zinc-900 bg-zinc-900 text-stone-100 flex items-center justify-center">
+                        <FileText className="w-4 h-4" />
+                      </div>
+                    )}
+                    <span className="text-[9px] font-mono font-bold uppercase text-zinc-700 truncate">{attachment.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="absolute bottom-3 left-3">
+              <button
+                onClick={() => setShowAttachmentSheet(true)}
+                className="p-3 bg-stone-100 text-zinc-900 rounded-sm border-2 border-zinc-900 shadow-[4px_4px_0px_0px_rgba(24,24,27,1)] transition-all active:translate-x-[2px] active:translate-y-[2px] active:shadow-[2px_2px_0px_0px_rgba(24,24,27,1)]"
+              >
+                <Plus className="w-6 h-6" />
+              </button>
+            </div>
             <div className="absolute bottom-3 right-3 flex gap-2">
               <button 
                 onClick={toggleListening}
@@ -1936,12 +2021,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
-        <QuickActions onAction={(type) => {
-          if (type === 'talk') toggleListening();
-          if (type === 'type') { /* focus textarea */ }
-          if (type === 'photo') setShowPhotoCapture(true);
-        }} />
 
         {/* Status Overlay */}
         <AnimatePresence>
@@ -2087,6 +2166,81 @@ export default function App() {
                 )}
               </div>
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        <input
+          ref={imageUploadRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleImageUpload}
+        />
+        <input
+          ref={fileUploadRef}
+          type="file"
+          className="hidden"
+          onChange={handleFileUpload}
+        />
+
+        <AnimatePresence>
+          {showAttachmentSheet && (
+            <>
+              <motion.button
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowAttachmentSheet(false)}
+                className="fixed inset-0 bg-black/50 z-40"
+              />
+              <motion.div
+                initial={{ y: '100%' }}
+                animate={{ y: 0 }}
+                exit={{ y: '100%' }}
+                transition={{ type: 'spring', damping: 26, stiffness: 280 }}
+                className="fixed inset-x-0 bottom-0 z-50 max-w-md mx-auto bg-stone-100 border-t-4 border-zinc-900 shadow-[0px_-6px_0px_0px_rgba(24,24,27,1)]"
+              >
+                <div className="p-4 border-b-2 border-zinc-900">
+                  <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-orange-600">Add Attachment</p>
+                  <h3 className="font-oswald font-bold text-2xl uppercase text-zinc-900">Choose a Source</h3>
+                </div>
+                <div className="p-4 grid gap-3">
+                  <button
+                    onClick={() => {
+                      setShowAttachmentSheet(false);
+                      setShowPhotoCapture(true);
+                    }}
+                    className="w-full p-4 bg-stone-200 border-2 border-zinc-900 rounded-sm flex items-center justify-between text-left shadow-[3px_3px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                  >
+                    <span>
+                      <span className="block font-oswald text-xl font-bold uppercase text-zinc-900">Take Picture</span>
+                      <span className="block text-[10px] font-mono font-bold uppercase text-zinc-500">Open camera</span>
+                    </span>
+                    <Camera className="w-5 h-5 text-orange-600" />
+                  </button>
+                  <button
+                    onClick={() => imageUploadRef.current?.click()}
+                    className="w-full p-4 bg-stone-200 border-2 border-zinc-900 rounded-sm flex items-center justify-between text-left shadow-[3px_3px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                  >
+                    <span>
+                      <span className="block font-oswald text-xl font-bold uppercase text-zinc-900">Add Existing Image</span>
+                      <span className="block text-[10px] font-mono font-bold uppercase text-zinc-500">Pick from device</span>
+                    </span>
+                    <ImageIcon className="w-5 h-5 text-orange-600" />
+                  </button>
+                  <button
+                    onClick={() => fileUploadRef.current?.click()}
+                    className="w-full p-4 bg-stone-200 border-2 border-zinc-900 rounded-sm flex items-center justify-between text-left shadow-[3px_3px_0px_0px_rgba(24,24,27,1)] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none transition-all"
+                  >
+                    <span>
+                      <span className="block font-oswald text-xl font-bold uppercase text-zinc-900">Add File</span>
+                      <span className="block text-[10px] font-mono font-bold uppercase text-zinc-500">Attach document or screenshot</span>
+                    </span>
+                    <FileText className="w-5 h-5 text-orange-600" />
+                  </button>
+                </div>
+              </motion.div>
+            </>
           )}
         </AnimatePresence>
 

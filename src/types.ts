@@ -3,6 +3,15 @@ export type InputType = 'typed' | 'voice';
 export type VendorCategory = 'HVAC' | 'Plumbing' | 'Electrical' | 'General Supply' | 'Subcontractor' | 'Rental' | 'Other';
 export type PriceMemorySourceType = 'capture' | 'work_order' | 'invoice' | 'manual';
 export type MaterialVarianceHandling = 'kept_entered' | 'used_last_known' | 'intentional';
+export type FieldEventType = 'note' | 'photo' | 'voice_memo' | 'part_mention' | 'labor_mention' | 'gps_stamp' | 'signature' | 'system';
+export type FieldEventSourceType = 'typed_note' | 'photo' | 'voice_memo' | 'part' | 'labor' | 'gps' | 'signature' | 'system';
+export type FieldEventStatus = 'captured' | 'matched' | 'needs_assignment' | 'confirmed' | 'archived';
+export type JobMatchStatus = 'pending' | 'resolved' | 'needs_assignment' | 'reassigned';
+export type AttachmentKind = 'photo' | 'voice_memo' | 'document' | 'signature' | 'other';
+export type JobMatchStrategy = 'explicit_job' | 'gps_proximity' | 'address_match' | 'gps_and_address' | 'manual';
+export type JobMatchSuggestionResolution = 'pending' | 'auto_assigned' | 'accepted' | 'rejected' | 'superseded';
+export type ConfirmationRequestType = 'assign_job' | 'confirm_job_match';
+export type ConfirmationRequestStatus = 'open' | 'confirmed' | 'rejected' | 'cancelled' | 'expired';
 export type PrimaryAction = 'generate_proposal' | 'log_to_job' | 'notify_office' | 'escalate_emergency';
 export type CaptureUrgency = 'default' | 'urgent';
 export type OpsQueueName = 'proposals' | 'work_orders' | 'office_updates' | 'emergencies';
@@ -188,6 +197,151 @@ export interface SupabaseJob {
   customerName: string;
   status: string;
   createdAt: string;
+}
+
+export interface SourceOfTruthJob {
+  id: string;
+  orgId?: string;
+  jobId: string;
+  customerName: string;
+  status: string;
+  addressText?: string;
+  latitude?: number;
+  longitude?: number;
+  geofenceRadiusMeters?: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FieldEvent {
+  id: string;
+  orgId?: string;
+  jobId?: string;
+  suggestedJobId?: string;
+  jobMatchConfidence?: number;
+  distanceToJobMeters?: number;
+  suggested_job_id?: string;
+  job_match_confidence?: number;
+  distance_to_job_meters?: number;
+  eventType: FieldEventType;
+  sourceType: FieldEventSourceType;
+  status: FieldEventStatus;
+  jobMatchStatus: JobMatchStatus;
+  job_match_status?: JobMatchStatus;
+  captureText?: string;
+  transcriptionText?: string;
+  structuredPayload: Record<string, unknown>;
+  storagePaths?: string[];
+  fileUrls?: string[];
+  gpsLatitude?: number;
+  gpsLongitude?: number;
+  gpsAccuracyMeters?: number;
+  captureAddressText?: string;
+  capturedAt: string;
+  capturedBy?: string;
+  assignedToUser?: string;
+  signatureName?: string;
+  latestJobMatchSuggestionId?: string;
+  latestConfirmationRequestId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateFieldEventInput {
+  orgId?: string;
+  jobId?: string;
+  eventType: FieldEventType;
+  sourceType: FieldEventSourceType;
+  captureText?: string;
+  transcriptionText?: string;
+  structuredPayload?: Record<string, unknown>;
+  gpsLatitude?: number;
+  gpsLongitude?: number;
+  gpsAccuracyMeters?: number;
+  captureAddressText?: string;
+  capturedAt?: string;
+  capturedBy?: string;
+  signatureName?: string;
+}
+
+export interface FieldAttachmentRecord {
+  id: string;
+  fieldEventId: string;
+  jobId?: string;
+  attachmentType: AttachmentKind;
+  documentType?: string;
+  storageBucket?: string;
+  storagePath?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSizeBytes?: number;
+  checksumSha256?: string;
+  metadata: Record<string, unknown>;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface CreateAttachmentInput {
+  fieldEventId: string;
+  jobId?: string;
+  attachmentType: AttachmentKind;
+  documentType?: string;
+  storageBucket?: string;
+  storagePath?: string;
+  fileName?: string;
+  mimeType?: string;
+  fileSizeBytes?: number;
+  checksumSha256?: string;
+  metadata?: Record<string, unknown>;
+  createdBy?: string;
+}
+
+export interface JobMatchSuggestionRecord {
+  id: string;
+  fieldEventId: string;
+  suggestedJobId?: string;
+  strategy: JobMatchStrategy;
+  confidence: number;
+  distanceMeters?: number;
+  addressMatch: boolean;
+  gpsMatch: boolean;
+  rationale?: string;
+  resolved: boolean;
+  resolution: JobMatchSuggestionResolution;
+  createdAt: string;
+}
+
+export interface ConfirmationRequestRecord {
+  id: string;
+  fieldEventId: string;
+  requestType: ConfirmationRequestType;
+  status: ConfirmationRequestStatus;
+  requestedUser: string;
+  suggestedJobId?: string;
+  message?: string;
+  respondedAt?: string;
+  responseNotes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  entityType: string;
+  entityId: string;
+  action: string;
+  actor?: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface JobMatchCandidate {
+  jobId: string;
+  sourceJobId: string;
+  confidence: number;
+  distanceMeters?: number;
+  recencyHours?: number;
 }
 
 export interface ComparableVendorQuote {
